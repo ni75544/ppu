@@ -1,0 +1,228 @@
+<?php
+
+/**
+ * @file
+ * Install and update hooks for Custom Webform Handlers.
+ */
+
+/**
+ * Implements hook_requirements().
+ */
+function custom_webform_handlers_requirements($phase): array {
+  if ($phase !== 'runtime') {
+    return [];
+  }
+
+  $config = \Drupal::config('custom_webform_handlers.settings');
+  $server_key_configured = (string) \Drupal\Core\Site\Settings::get('custom_webform_handlers_server_api_key', '') !== '';
+  $browser_key_configured = (string) $config->get('google_maps_browser_api_key') !== '';
+  $rate_version = trim((string) $config->get('quote.rate_version'));
+
+  return [
+    'custom_webform_handlers_server_key' => [
+      'title' => t('Shipping quote server API key'),
+      'value' => $server_key_configured ? t('Configured') : t('Missing'),
+      'severity' => $server_key_configured ? REQUIREMENT_OK : REQUIREMENT_ERROR,
+      'description' => $server_key_configured
+        ? t('The server-side Google Routes key is available through Drupal settings.')
+        : t('Configure custom_webform_handlers_server_api_key in settings.php before calculating routes.'),
+    ],
+    'custom_webform_handlers_browser_key' => [
+      'title' => t('Shipping quote browser API key'),
+      'value' => $browser_key_configured ? t('Configured') : t('Missing'),
+      'severity' => $browser_key_configured ? REQUIREMENT_OK : REQUIREMENT_ERROR,
+      'description' => $browser_key_configured
+        ? t('The browser key is configured. Confirm HTTP-referrer restrictions in Google Cloud Console.')
+        : t('Configure a restricted browser key for Maps JavaScript and Places autocomplete.'),
+    ],
+    'custom_webform_handlers_rate_version' => [
+      'title' => t('Shipping quote rate version'),
+      'value' => $rate_version !== '' ? $rate_version : t('Missing'),
+      'severity' => $rate_version !== '' ? REQUIREMENT_OK : REQUIREMENT_WARNING,
+      'description' => t('This version is stored with every authoritative quote for auditing.'),
+    ],
+  ];
+}
+
+/**
+ * Removes the legacy API key that was shared by browser and server requests.
+ */
+function custom_webform_handlers_update_10001(): string {
+  $config = \Drupal::configFactory()
+    ->getEditable('custom_webform_handlers.settings');
+
+  $config
+    ->clear('google_maps_api_key')
+    ->set('google_maps_browser_api_key', '')
+    ->save(TRUE);
+
+  return t('Removed the legacy Google Maps API key. Configure new restricted browser and server keys before re-enabling quote calculations.');
+}
+
+/**
+ * Installs centralized route and quote defaults for existing sites.
+ */
+function custom_webform_handlers_update_10002(): string {
+  $config = \Drupal::configFactory()
+    ->getEditable('custom_webform_handlers.settings');
+
+  if ($config->get('route_request_timeout') === NULL) {
+    $config->set('route_request_timeout', 8);
+  }
+  if ($config->get('route_cache_ttl') === NULL) {
+    $config->set('route_cache_ttl', 3600);
+  }
+  if ($config->get('preview_rate_limit') === NULL) {
+    $config->set('preview_rate_limit', 30);
+  }
+  if ($config->get('quote') === NULL) {
+    $config->set('quote', [
+      'currency' => 'USD',
+      'rate_version' => '2026-08-step3',
+      'long_distance' => [
+        'base_cents' => 50000,
+        'weight_distance_factor' => 0.00065,
+        'dimensional_weight_divisor' => 139,
+        'fallback_weight_lbs' => [
+          'studio' => 2500,
+          '1_br' => 4000,
+          '2_br' => 6000,
+          '3_br' => 8500,
+          '4_br_plus' => 12000,
+        ],
+      ],
+      'local_residential' => [
+        'base_cents' => [
+          'studio' => 41500,
+          '1_br' => 56900,
+          '2_br' => 90900,
+          '3_br' => 207300,
+          '4_br_plus' => 207300,
+        ],
+        'travel_speed_mph' => 30,
+        'travel_hourly_cents' => 11000,
+        'round_trip_multiplier' => 2,
+      ],
+      'fees' => [
+        'stairs_per_flight_cents' => 1750,
+        'passenger_elevator_cents' => 3500,
+        'freight_elevator_cents' => 2000,
+        'long_carry_cents' => 7500,
+        'shuttle_cents' => 25000,
+        'packing_cents' => 32500,
+        'cleaning_cents' => 21000,
+      ],
+      'commercial' => [
+        'base_cents' => 300000,
+        'distance_threshold_miles' => 50,
+        'excess_distance_cents_per_mile' => 200,
+        'packing_unpacking_cents' => 32500,
+        'it_services_cents' => 20000,
+        'furniture_assembly_cents' => 15000,
+      ],
+      'specialty' => [
+        'piano_cents' => 42500,
+        'gun_safe_cents' => 27500,
+        'fine_art_cents' => 35000,
+        'gym_equipment_cents' => 22500,
+        'other_cents' => 10000,
+      ],
+      'on_demand' => [
+        'van_1_helper_cents' => 20000,
+        'truck_1_helper_cents' => 30000,
+        'truck_2_helpers_cents' => 47500,
+        'rush_cents' => 7500,
+        'expedited_cents' => 15000,
+        'included_miles' => 10,
+        'excess_distance_cents_per_mile' => 100,
+      ],
+    ]);
+  }
+  $config->save(TRUE);
+
+  return t('Installed centralized route and quote defaults. Review all rates before production use.');
+}
+
+/**
+ * Adds the dimensional-weight divisor to existing quote configuration.
+ */
+function custom_webform_handlers_update_10003(): string {
+  $config = \Drupal::configFactory()
+    ->getEditable('custom_webform_handlers.settings');
+  if ($config->get('quote.long_distance.dimensional_weight_divisor') === NULL) {
+    $config->set('quote.long_distance.dimensional_weight_divisor', 139)->save(TRUE);
+  }
+  return t('Added the dimensional-weight divisor. Review it before production use.');
+}
+
+/**
+ * Marks the home-size weight-floor and packing de-duplication rules.
+ */
+function custom_webform_handlers_update_10004(): string {
+  $config = \Drupal::configFactory()
+    ->getEditable('custom_webform_handlers.settings');
+  if ($config->get('quote.rate_version') === '2026-08-step3') {
+    $config->set('quote.rate_version', '2026-08-weight-floor-v1')->save(TRUE);
+  }
+  return t('Updated the quote rule version for home-size weight floors and commercial packing de-duplication. Review all production rates.');
+}
+
+/**
+ * Completes configurable rates and adds conservative review classifications.
+ */
+function custom_webform_handlers_update_10005(): string {
+  $config = \Drupal::configFactory()
+    ->getEditable('custom_webform_handlers.settings');
+
+  if ($config->get('quote.rate_version') !== '2026-08-weight-floor-v1') {
+    return t('Skipped the proposed rate update because the active rate version was customized. Configure the new fields manually and choose a new rate version.');
+  }
+
+  $config
+    ->set('quote.local_residential.base_cents.few_items', 29500)
+    ->set('quote.local_residential.base_cents.4_br_plus', 300000)
+    ->set('quote.commercial.after_hours_percent', 20)
+    ->set('quote.commercial.weekend_percent', 15)
+    ->set('quote.diy_truck', [
+      'daily_base_cents' => [
+        '10_ft' => 9900,
+        '15_ft' => 12900,
+        '20_ft' => 15900,
+        '26_ft' => 19900,
+      ],
+      'included_miles_per_day' => 50,
+      'excess_mileage_cents_per_mile' => 129,
+      'insurance_cents_per_day' => 3500,
+      'dolly_cents_per_day' => 2000,
+      'pads_cents_per_day' => 2500,
+      'labor_help_minimum_cents' => 19000,
+    ])
+    ->set('quote.rate_version', '2026-08-complete-rates-v1')
+    ->save(TRUE);
+
+  return t('Installed proposed few-items, four-plus-bedroom, commercial timing, and DIY truck rates. Review all proposed rates before treating them as approved.');
+}
+
+/**
+ * Versions the required-input and calculator completeness safeguards.
+ */
+function custom_webform_handlers_update_10006(): string {
+  $config = \Drupal::configFactory()
+    ->getEditable('custom_webform_handlers.settings');
+  if ($config->get('quote.rate_version') === '2026-08-complete-rates-v1') {
+    $config->set('quote.rate_version', '2026-08-validation-v1')->save(TRUE);
+  }
+  return t('Enabled the Step 15 quote-input completeness rules. Existing monetary rates were not changed.');
+}
+
+/**
+ * Versions production failure handling and stale-value protection.
+ */
+function custom_webform_handlers_update_10007(): string {
+  $config = \Drupal::configFactory()
+    ->getEditable('custom_webform_handlers.settings');
+  if ($config->get('quote.rate_version') === '2026-08-validation-v1') {
+    $config->set('quote.rate_version', '2026-08-production-v1')->save(TRUE);
+  }
+  return t('Enabled stale-quote protection, classified failure metadata, no-cache preview responses, and Status Report diagnostics. Monetary rates were not changed.');
+}

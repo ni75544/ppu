@@ -1,0 +1,7 @@
+name: Custom Webform Handlers
+type: module
+description: Provides server-validated route distance and preliminary quote calculations for Webform.
+core_version_requirement: ^10
+package: Custom
+dependencies:
+  - drupal:webform

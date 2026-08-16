@@ -1,0 +1,208 @@
+.custom-webform-quote-experience {
+  display: grid;
+  gap: 1rem;
+  margin-block: 1rem;
+}
+
+.custom-webform-quote-experience__main {
+  min-width: 0;
+}
+
+.custom-webform-quote-experience__main > .shipping-quote-preview,
+.custom-webform-quote-experience__main > .custom-route-map-preview {
+  margin-block: 0;
+}
+
+.custom-webform-quote-experience__main > .custom-route-map-preview {
+  margin-top: 1rem;
+}
+
+.custom-quote-summary-sidebar {
+  --quote-summary-accent: #2563eb;
+  --quote-summary-border: #dbe4f0;
+  --quote-summary-muted: #526077;
+  background: #fff;
+  border: 1px solid var(--quote-summary-border);
+  border-radius: 0.75rem;
+  box-shadow: 0 0.75rem 2rem rgb(15 23 42 / 10%);
+  box-sizing: border-box;
+  color: #172033;
+  margin: 0;
+  max-width: none;
+  padding: 1.25rem;
+  position: relative;
+  top: auto;
+  width: 100%;
+  z-index: 2;
+}
+
+.custom-quote-summary-sidebar__header {
+  border-bottom: 1px solid var(--quote-summary-border);
+  margin-bottom: 1rem;
+  padding-bottom: 0.875rem;
+}
+
+.custom-quote-summary-sidebar__eyebrow {
+  color: var(--quote-summary-accent);
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  margin: 0 0 0.25rem;
+  text-transform: uppercase;
+}
+
+.custom-quote-summary-sidebar__title {
+  font-size: 1.25rem;
+  line-height: 1.25;
+  margin: 0;
+}
+
+.custom-quote-summary-sidebar__status,
+.custom-quote-summary-sidebar__distance,
+.custom-quote-summary-sidebar__disclaimer {
+  color: var(--quote-summary-muted);
+  font-size: 0.875rem;
+  line-height: 1.45;
+  margin: 0.5rem 0 0;
+}
+
+.custom-quote-summary-sidebar__status {
+  font-weight: 600;
+  min-height: 1.3em;
+}
+
+.custom-quote-summary-sidebar.is-updating .custom-quote-summary-sidebar__status::before {
+  animation: quote-summary-pulse 1.2s ease-in-out infinite;
+  background: var(--quote-summary-accent);
+  border-radius: 50%;
+  content: '';
+  display: inline-block;
+  height: 0.5rem;
+  margin-right: 0.45rem;
+  vertical-align: 0.0625rem;
+  width: 0.5rem;
+}
+
+.custom-quote-summary-sidebar__empty {
+  color: var(--quote-summary-muted);
+  line-height: 1.5;
+  margin: 0;
+}
+
+.custom-quote-summary-sidebar__items {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.custom-quote-summary-sidebar__item {
+  align-items: baseline;
+  display: flex;
+  gap: 0.75rem;
+  justify-content: space-between;
+  padding-block: 0.5rem;
+}
+
+.custom-quote-summary-sidebar__item + .custom-quote-summary-sidebar__item {
+  border-top: 1px solid #edf1f7;
+}
+
+.custom-quote-summary-sidebar__item-label {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.custom-quote-summary-sidebar__item-amount {
+  flex-shrink: 0;
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  text-align: end;
+  white-space: nowrap;
+}
+
+.custom-quote-summary-sidebar__total {
+  align-items: baseline;
+  border-top: 2px solid var(--quote-summary-border);
+  display: flex;
+  font-size: 1rem;
+  justify-content: space-between;
+  margin-top: 1rem;
+  padding-top: 1rem;
+}
+
+.custom-quote-summary-sidebar__total-amount {
+  color: var(--quote-summary-accent);
+  font-size: 1.35rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.custom-webform-manual-review-badge {
+  align-items: center;
+  animation: custom-webform-manual-review-enter 220ms ease-out both,
+    custom-webform-manual-review-pulse 1.6s ease-in-out 3 220ms;
+  background: #fffbeb;
+  border: 1px solid #f59e0b;
+  border-radius: 999px;
+  box-sizing: border-box;
+  color: #92400e;
+  display: inline-flex;
+  font-size: 0.9375rem;
+  font-weight: 700;
+  gap: 0.35rem;
+  line-height: 1.2;
+  margin: 1rem 0 0;
+  padding: 0.625rem 0.875rem;
+}
+
+.custom-quote-summary-sidebar__manual-review-badge {
+  margin-top: 1rem;
+}
+
+@keyframes quote-summary-pulse {
+  50% {
+    opacity: 0.35;
+    transform: scale(0.75);
+  }
+}
+
+@media (min-width: 64rem) {
+  .custom-webform-quote-experience {
+    align-items: start;
+    gap: clamp(1.25rem, 3vw, 2.5rem);
+    grid-template-columns: minmax(0, 1fr) minmax(19rem, 24rem);
+  }
+
+  .custom-quote-summary-sidebar {
+    max-height: calc(100vh - 2rem);
+    overflow: auto;
+    position: sticky;
+    top: 1rem;
+    scrollbar-width: thin;
+  }
+}
+
+@keyframes custom-webform-manual-review-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-0.25rem) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes custom-webform-manual-review-pulse {
+  50% {
+    box-shadow: 0 0 0 0.35rem rgb(245 158 11 / 16%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .custom-webform-manual-review-badge,
+  .custom-quote-summary-sidebar.is-updating .custom-quote-summary-sidebar__status::before {
+    animation: none;
+  }
+}

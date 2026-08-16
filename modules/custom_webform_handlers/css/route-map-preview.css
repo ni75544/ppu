@@ -1,0 +1,52 @@
+.custom-route-map-preview {
+  background: #fff;
+  border: 1px solid #dbe4f0;
+  border-radius: 0.875rem;
+  box-shadow: 0 0.5rem 1.5rem rgb(15 23 42 / 8%);
+  margin-block: 1rem;
+  overflow: hidden;
+}
+
+.custom-route-map-preview[hidden] {
+  display: none;
+}
+
+.custom-route-map-preview__header {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  justify-content: space-between;
+  padding: 1rem clamp(1rem, 3vw, 1.5rem);
+}
+
+.custom-route-map-preview__title {
+  color: #172033;
+  font-size: 1.0625rem;
+  margin: 0;
+}
+
+.custom-route-map-preview__status {
+  color: #526077;
+  font-size: 0.875rem;
+  margin: 0;
+}
+
+.custom-route-map-preview__canvas {
+  background: linear-gradient(135deg, #f8fafc, #eef6ff);
+  height: clamp(16rem, 36vw, 24rem);
+  min-height: 16rem;
+  width: 100%;
+}
+
+.custom-route-map-preview__canvas:focus-visible {
+  outline: 3px solid #2563eb;
+  outline-offset: -3px;
+}
+
+@media (max-width: 47.99rem) {
+  .custom-route-map-preview__canvas {
+    height: 15rem;
+    min-height: 15rem;
+  }
+}

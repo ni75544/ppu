@@ -1,0 +1,36 @@
+distance_calculator:
+  version: 1.1.10
+  css:
+    component:
+      css/distance_calculator.css: {}
+  js:
+    js/distance_calculator.js: {}
+  dependencies:
+    - core/jquery
+    - core/drupal
+    - core/drupalSettings
+    - core/once
+
+quote_summary_sidebar:
+  version: 1.1.10
+  css:
+    component:
+      css/quote-summary-sidebar.css: {}
+  js:
+    js/quote-summary-sidebar.js: {}
+  dependencies:
+    - core/drupal
+    - core/drupalSettings
+    - core/once
+
+route_map_preview:
+  version: 1.1.10
+  css:
+    component:
+      css/route-map-preview.css: {}
+  js:
+    js/route-map-preview.js: {}
+  dependencies:
+    - custom_webform_handlers/distance_calculator
+    - core/drupal
+    - core/once

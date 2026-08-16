@@ -1,0 +1,71 @@
+google_maps_browser_api_key: ''
+route_request_timeout: 8
+route_cache_ttl: 3600
+preview_rate_limit: 30
+quote:
+  currency: USD
+  rate_version: '2026-08-production-v1'
+  long_distance:
+    base_cents: 50000
+    weight_distance_factor: 0.00065
+    dimensional_weight_divisor: 139
+    fallback_weight_lbs:
+      studio: 2500
+      1_br: 4000
+      2_br: 6000
+      3_br: 8500
+      4_br_plus: 12000
+  local_residential:
+    base_cents:
+      studio: 41500
+      1_br: 56900
+      2_br: 90900
+      3_br: 207300
+      4_br_plus: 300000
+      few_items: 29500
+    travel_speed_mph: 30
+    travel_hourly_cents: 11000
+    round_trip_multiplier: 2
+  fees:
+    stairs_per_flight_cents: 1750
+    passenger_elevator_cents: 3500
+    freight_elevator_cents: 2000
+    long_carry_cents: 7500
+    shuttle_cents: 25000
+    packing_cents: 32500
+    cleaning_cents: 21000
+  commercial:
+    base_cents: 300000
+    distance_threshold_miles: 50
+    excess_distance_cents_per_mile: 200
+    packing_unpacking_cents: 32500
+    it_services_cents: 20000
+    furniture_assembly_cents: 15000
+    after_hours_percent: 20
+    weekend_percent: 15
+  specialty:
+    piano_cents: 42500
+    gun_safe_cents: 27500
+    fine_art_cents: 35000
+    gym_equipment_cents: 22500
+    other_cents: 10000
+  on_demand:
+    van_1_helper_cents: 20000
+    truck_1_helper_cents: 30000
+    truck_2_helpers_cents: 47500
+    rush_cents: 7500
+    expedited_cents: 15000
+    included_miles: 10
+    excess_distance_cents_per_mile: 100
+  diy_truck:
+    daily_base_cents:
+      10_ft: 9900
+      15_ft: 12900
+      20_ft: 15900
+      26_ft: 19900
+    included_miles_per_day: 50
+    excess_mileage_cents_per_mile: 129
+    insurance_cents_per_day: 3500
+    dolly_cents_per_day: 2000
+    pads_cents_per_day: 2500
+    labor_help_minimum_cents: 19000

@@ -1,0 +1,20 @@
+services:
+  logger.channel.custom_webform_handlers:
+    parent: logger.channel_base
+    arguments: ['custom_webform_handlers']
+
+  custom_webform_handlers.google_routes_distance_provider:
+    class: Drupal\custom_webform_handlers\Distance\GoogleRoutesDistanceProvider
+    arguments:
+      - '@http_client'
+      - '@cache.default'
+      - '@config.factory'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.distance_provider:
+    alias: custom_webform_handlers.google_routes_distance_provider
+
+  custom_webform_handlers.quote_calculator:
+    class: Drupal\custom_webform_handlers\Quote\QuoteCalculator
+    arguments:
+      - '@config.factory'

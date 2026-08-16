@@ -1,0 +1,126 @@
+custom_webform_handlers.settings:
+  type: config_object
+  label: 'Distance Calculator settings'
+  mapping:
+    google_maps_browser_api_key:
+      type: string
+      label: 'Google Maps browser API key'
+    route_request_timeout:
+      type: integer
+      label: 'Route request timeout in seconds'
+    route_cache_ttl:
+      type: integer
+      label: 'Route result cache lifetime in seconds'
+    preview_rate_limit:
+      type: integer
+      label: 'Distance preview requests allowed per hour and IP address'
+    quote:
+      type: mapping
+      label: 'Quote calculation settings'
+      mapping:
+        currency:
+          type: string
+          label: 'Currency code'
+        rate_version:
+          type: string
+          label: 'Rate version'
+        long_distance:
+          type: mapping
+          label: 'Long-distance rates'
+          mapping:
+            base_cents:
+              type: integer
+              label: 'Base charge in cents'
+            weight_distance_factor:
+              type: float
+              label: 'Dollar rate factor per pound-mile'
+            dimensional_weight_divisor:
+              type: integer
+              label: 'Dimensional weight divisor for measurements in inches'
+            fallback_weight_lbs:
+              type: mapping
+              label: 'Fallback shipment weights in pounds'
+              mapping:
+                studio: { type: integer, label: 'Studio' }
+                1_br: { type: integer, label: 'One bedroom' }
+                2_br: { type: integer, label: 'Two bedrooms' }
+                3_br: { type: integer, label: 'Three bedrooms' }
+                4_br_plus: { type: integer, label: 'Four or more bedrooms' }
+                few_items: { type: integer, label: 'Few items' }
+        local_residential:
+          type: mapping
+          label: 'Local residential rates'
+          mapping:
+            base_cents:
+              type: mapping
+              label: 'Base charges by move size'
+              mapping:
+                studio: { type: integer, label: 'Studio' }
+                1_br: { type: integer, label: 'One bedroom' }
+                2_br: { type: integer, label: 'Two bedrooms' }
+                3_br: { type: integer, label: 'Three bedrooms' }
+                4_br_plus: { type: integer, label: 'Four or more bedrooms' }
+            travel_speed_mph: { type: integer, label: 'Travel speed in miles per hour' }
+            travel_hourly_cents: { type: integer, label: 'Travel hourly charge in cents' }
+            round_trip_multiplier: { type: float, label: 'Round trip multiplier' }
+        fees:
+          type: mapping
+          label: 'Access and add-on fees'
+          mapping:
+            stairs_per_flight_cents: { type: integer, label: 'Stair fee per flight' }
+            passenger_elevator_cents: { type: integer, label: 'Passenger elevator fee' }
+            freight_elevator_cents: { type: integer, label: 'Freight elevator fee' }
+            long_carry_cents: { type: integer, label: 'Long carry fee' }
+            shuttle_cents: { type: integer, label: 'Shuttle fee' }
+            packing_cents: { type: integer, label: 'Packing fee' }
+            cleaning_cents: { type: integer, label: 'Cleaning fee' }
+        commercial:
+          type: mapping
+          label: 'Commercial move rates'
+          mapping:
+            base_cents: { type: integer, label: 'Base charge' }
+            distance_threshold_miles: { type: integer, label: 'Included distance in miles' }
+            excess_distance_cents_per_mile: { type: integer, label: 'Excess distance charge per mile' }
+            packing_unpacking_cents: { type: integer, label: 'Packing and unpacking fee' }
+            it_services_cents: { type: integer, label: 'IT services fee' }
+            furniture_assembly_cents: { type: integer, label: 'Furniture assembly fee' }
+            after_hours_percent: { type: integer, label: 'After-hours premium percentage' }
+            weekend_percent: { type: integer, label: 'Weekend premium percentage' }
+        specialty:
+          type: mapping
+          label: 'Specialty item rates'
+          mapping:
+            piano_cents: { type: integer, label: 'Piano fee' }
+            gun_safe_cents: { type: integer, label: 'Gun safe fee' }
+            fine_art_cents: { type: integer, label: 'Fine art fee' }
+            gym_equipment_cents: { type: integer, label: 'Gym equipment fee' }
+            other_cents: { type: integer, label: 'Other item fee' }
+        on_demand:
+          type: mapping
+          label: 'On-demand delivery rates'
+          mapping:
+            van_1_helper_cents: { type: integer, label: 'Van with one helper' }
+            truck_1_helper_cents: { type: integer, label: 'Truck with one helper' }
+            truck_2_helpers_cents: { type: integer, label: 'Truck with two helpers' }
+            rush_cents: { type: integer, label: 'Rush fee' }
+            expedited_cents: { type: integer, label: 'Expedited fee' }
+            included_miles: { type: integer, label: 'Included miles' }
+            excess_distance_cents_per_mile: { type: integer, label: 'Excess distance charge per mile' }
+        diy_truck:
+          type: mapping
+          label: 'DIY truck-rental rates'
+          mapping:
+            daily_base_cents:
+              type: mapping
+              label: 'Daily truck charges by size'
+              mapping:
+                10_ft: { type: integer, label: '10-foot truck' }
+                15_ft: { type: integer, label: '15-foot truck' }
+                20_ft: { type: integer, label: '20-foot truck' }
+                26_ft: { type: integer, label: '26-foot truck' }
+            included_miles_per_day: { type: integer, label: 'Included miles per day' }
+            excess_mileage_cents_per_mile: { type: integer, label: 'Excess mileage charge per mile' }
+            insurance_cents_per_day: { type: integer, label: 'Damage waiver per day' }
+            dolly_cents_per_day: { type: integer, label: 'Dolly charge per day' }
+            pads_cents_per_day: { type: integer, label: 'Furniture pads charge per day' }
+            labor_help_minimum_cents: { type: integer, label: 'Labor help minimum' }

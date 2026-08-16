@@ -1,0 +1,24 @@
+custom_webform_handlers.google_api_settings:
+  path: '/admin/config/services/custom-webform-handlers'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\GoogleApiSettingsForm'
+    _title: 'Google API Settings'
+  requirements:
+    _permission: 'administer site configuration'
+
+custom_webform_handlers.quote_settings:
+  path: '/admin/config/services/custom-webform-handlers/quote'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\QuoteSettingsForm'
+    _title: 'Shipping quote settings'
+  requirements:
+    _permission: 'administer site configuration'
+
+custom_webform_handlers.distance_preview:
+  path: '/custom-webform-handlers/distance-preview'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\DistancePreviewController::preview'
+  methods: [POST]
+  requirements:
+    _access: 'TRUE'
+    _csrf_request_header_token: 'TRUE'
