@@ -1,0 +1,40 @@
+# Paths Graphify must not index for the ppu project.
+#
+# Only project-owned code, configuration, documentation, and the local schema
+# dump belong in the graph. Drupal core, contrib, and vendor trees would
+# otherwise dominate the node count and bury the custom module.
+
+# Drupal core and vendor trees (both layouts).
+core/
+web/core/
+vendor/
+web/vendor/
+
+# Contributed modules.
+modules/contrib/
+web/modules/contrib/
+
+# User-generated and build output.
+sites/default/files/
+node_modules/
+graphify-out/
+
+# Leftover test-run site artifacts.
+sites/simpletest/
+
+# The parallel docroot. DDEV serves this project from the repository root
+# (.ddev/config.yaml sets `docroot: .`), so everything under web/ is a second
+# copy of the same site — including web/custom_webform_handlers/, a third copy
+# of the active module. Indexing it defines the same classes twice and makes
+# path and dependency queries ambiguous, which is worse than missing data.
+/web/
+
+# The root-level duplicate of the custom module. Anchored with a leading slash
+# on purpose: an unanchored pattern matches a directory of this name at ANY
+# depth under gitignore-style semantics, which would also exclude the active
+# module at modules/custom_webform_handlers/ and defeat the whole index.
+/custom_webform_handlers/
+
+# Archives carry no graphable source.
+*.zip
+*.tar.gz

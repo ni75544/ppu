@@ -1,0 +1,7 @@
+# Generated knowledge-graph artifacts.
+#
+# These are large, rewritten on every extraction, and would invalidate Claude
+# Code's prompt cache on each rebuild. Query them through the graphify CLI
+# instead of reading them as context.
+graphify-out/
+graph.json

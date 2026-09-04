@@ -121,7 +121,7 @@ graph.json
 #
 # Each entry is an exact anchored path on purpose. There is deliberately no
 # root-file, sites/**, profiles/** or themes/** wildcard here: authored siblings
-# such as /LICENSE.txt, /.user.ini, /404.html, /502.html, /CLAUDE.md, /CONTEXT.md,
+# such as /LICENSE.txt, /.user.ini, /CLAUDE.md, /CONTEXT.md,
 # /composer.json, /composer.lock and /sites/sites.php must stay trackable, and
 # /README.md below is the Drupal scaffold README — it cannot reach qa/README.md
 # or docs/**, which are anchored away by the leading slash.
@@ -178,3 +178,21 @@ graph.json
 /.claude/
 /modules/custom_webform_handlers/.claude/
 /.mcp.json
+
+# Unserved third-party error pages left at the repository root. TASK 15 proved
+# both are unreferenced by anything that serves this site: 0 ErrorDocument and
+# 0 error_page directives exist in .htaccess, web.config, .ht.router.php or
+# .ddev/**; all 8 try_files directives route to /index.php or @rewrite; neither
+# name appears in composer.json, composer.lock or the core scaffold
+# file-mapping; and system.site page.403/page.404 are empty on both sites. Each
+# file is a 74-line unbranded page holding one inline base64 image and a single
+# outbound link to one third-party host, with 0 Drupal, DDEV or
+# custom_webform_handlers markers -- generated third-party output rather than an
+# intentional project page. Removed from the index by TASK 15; both remain on
+# disk untouched. They were previously listed among the authored scaffold
+# siblings further up, and that stale mention was corrected in the same change.
+#
+# Exactly these two anchored paths. Never widen this to /*.html, which would
+# swallow any future authored root-level page.
+/404.html
+/502.html

@@ -1,0 +1,6 @@
+﻿**/*.sql
+**/vendor/**
+**/core/**
+**/contrib/**
+**/sites/**
+**/node_modules/**
