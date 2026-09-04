@@ -196,3 +196,14 @@ graph.json
 # swallow any future authored root-level page.
 /404.html
 /502.html
+
+# Local container runtime override; never portable project configuration.
+/.user.ini
+
+# Archived local execution briefs. Preserve on disk, never version as source.
+/DISPATCH_PLANNER_EXECUTION_TASKS.md
+/INSTALLATION_STEP15.md
+/TASK_3_DISPATCH_PLANNER.md
+/TASK_4_CLAUDE_CODE_PROMPT.md
+/TASK_7_MICRO_PASSES.md
+/TASK_7_RECOVERY_PROMPT.md
