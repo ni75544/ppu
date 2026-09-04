@@ -150,3 +150,31 @@ graph.json
 /sites/development.services.yml
 /sites/example.settings.local.php
 /sites/example.sites.php
+
+# ddev/ddev-selenium-standalone-chrome add-on output. Its first line is the
+# #ddev-generated marker, so `ddev get ddev/ddev-selenium-standalone-chrome`
+# rewrites it, and two of its web_environment entries embed a
+# scheme://user:pass@host test-database URL. Generated plus credential-bearing,
+# therefore never versioned — it is recreated by re-adding the add-on.
+#
+# Exactly this one path, anchored to the root. The rest of .ddev/ is authored or
+# credential-free and stays tracked (.ddev/config.yaml, the two
+# addon-metadata/*/manifest.yaml files, the redis and command scripts), so this
+# must never be widened to /.ddev/ or /.ddev/config.*.yaml.
+/.ddev/config.selenium-standalone-chrome.yaml
+
+# Local agent/tool configuration. Machine-bound (absolute host paths, per-user
+# tokens) and unnecessary to build, test or run the committed Dispatch system, so
+# it is kept on disk and out of Git. Removed from the index by TASK 14B; nothing
+# in composer.json, .ddev/, the module, or qa/ reads any of these paths.
+#
+# The four directory rules end in "/" on purpose: they match directories only, so
+# the repository-scoped, portable, credential-free .claudeignore, .graphifyignore
+# and .gitnexusignore keep their existing tracked status, as do CLAUDE.md and
+# CONTEXT.md — the latter is cited by 20 committed files and must stay versioned.
+# Do not widen these to /.claude*, /.agents*, /modules/**, or /*.json.
+/.agents/
+/skills-lock.json
+/.claude/
+/modules/custom_webform_handlers/.claude/
+/.mcp.json
