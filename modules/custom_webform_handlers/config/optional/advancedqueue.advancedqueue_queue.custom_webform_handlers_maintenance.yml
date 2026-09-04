@@ -1,0 +1,51 @@
+# The maintenance queue: precomputation and nightly aggregation.
+#
+# Placed in config/optional and enforced-owned for the same reasons as the
+# dispatch queue beside it, and on the same durable SQL backend. Read that file
+# first; only the differences are argued here.
+#
+# Why this is a second queue rather than two more job types on the dispatch
+# queue. Advanced Queue budgets a cron run PER QUEUE: "processing_time" is how
+# long the processor may spend on THIS queue before returning. Route warming
+# issues a bounded batch of outbound Google Routes calls, and nightly popularity
+# scans an aggregate over paid checkout attempts - work measured in tens of
+# seconds and dominated by latency this site does not control. Sharing the
+# dispatch queue's 90-second budget would let one slow warm batch consume it and
+# push a booking confirmation to the next cron run. On an hourly cron that is an
+# hour before the customer learns their courier is confirmed. Separating the
+# queues makes that impossible: a saturated maintenance queue delays only
+# maintenance.
+#
+# lease_time is 900 rather than the dispatch queue's 300 because a single job
+# here is legitimately long. The lease must outlast the slowest plausible run,
+# or the processor reclaims a job that is still working and a second worker
+# repeats it - which for an aggregate would double-count.
+#
+# processing_time is 180: generous enough to finish a normal night's work in one
+# cron run, bounded so cron cannot be held open by this queue. With
+# stop_when_empty true a short queue costs nothing, and leftovers simply run on
+# the next cron.
+#
+# Nothing in this queue is an authority. It warms caches and writes aggregate
+# counts; it never decides price, eligibility, capacity, or payment, and every
+# consumer of its output falls back to a deterministic configured answer when
+# the output is missing or stale.
+langcode: en
+status: true
+dependencies:
+  enforced:
+    module:
+      - custom_webform_handlers
+id: custom_webform_handlers_maintenance
+label: 'Dispatch maintenance jobs'
+backend: database
+backend_configuration:
+  lease_time: 900
+processor: cron
+processing_time: 180
+locked: true
+stop_when_empty: true
+threshold:
+  type: 0
+  limit: 0
+  state: all

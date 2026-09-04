@@ -1,0 +1,114 @@
+# The checkout flow a dispatch job is paid through.
+#
+# It is dispatch_flow, which is Commerce's own multistep_default plugin with one
+# addition and no other difference: it refuses to place the order unless the Slot
+# has actually been confirmed. The sequence a courier booking needs is the sequence
+# Commerce already ships — identify the customer, take contact and payment details,
+# review, charge, and confirm — and what is bespoke is which panes stand on which
+# step, which is what this configuration decides. The one thing configuration could
+# not decide is when the order is placed: Commerce places it, and so emails the
+# customer their receipt, inside the same call that authorises the card, before any
+# pane can say whether capacity was confirmed. DispatchCheckoutFlow moves that
+# decision to before the placement. Nothing else about the flow is subclassed.
+#
+# Every pane the pane manager can discover is placed here on purpose. A pane that
+# is left out of this list does not vanish — CheckoutFlowWithPanesBase::getPanes()
+# instantiates every discovered definition and falls back to the pane's own
+# default step — so the only way to keep a stock pane off the flow is to name it
+# and send it to _disabled. The stock panes this flow deliberately retires are
+# billing_information (a courier job has no billing profile to collect; the name
+# and phone are typed order fields instead), payment_process (replaced by the
+# dispatch subclass that confirms capacity in the same request as the
+# authorisation), and completion_message (replaced by the dispatch confirmation
+# pane, which says the same thing in the customer's terms).
+#
+# The money model this flow serves is authorize -> synchronously confirm capacity
+# -> capture only after confirmation. That is why payment_process is disabled and
+# dispatch_payment_process (capture: false) stands on the payment step in its
+# place: it authorises the card, confirms the Reservation under the Resource
+# Calendar Guard in the same request, and only then captures. No slot is ever
+# paid for before it is confirmed, and no confirmed slot is left uncharged. The
+# flow plugin closes the last gap in that model: a refused Slot never places the
+# order, so a customer who was not booked is never sent a receipt saying they were.
+langcode: en
+status: true
+dependencies:
+  module:
+    - commerce_checkout
+    - commerce_payment
+    - custom_webform_handlers
+id: dispatch
+label: Dispatch
+plugin: dispatch_flow
+configuration:
+  display_checkout_progress: true
+  display_checkout_progress_breadcrumb_links: false
+  display_sidebar_checkout_complete: true
+  guest_order_assign: false
+  guest_new_account: false
+  guest_new_account_notify: false
+  panes:
+    # Step 1 of checkout: who is booking. Guest checkout is on because dispatch
+    # customers are anonymous; registration is off because a courier booking does
+    # not need an account to exist.
+    login:
+      allow_guest_checkout: true
+      allow_registration: false
+      step: login
+      weight: 0
+    # Step 3 (contact + payment details). The email goes to the order's own mail
+    # field; double entry is off because the address was already supplied on the
+    # public form and pre-fills here.
+    contact_information:
+      double_entry: false
+      step: order_information
+      weight: 1
+    # Name and phone, written to two typed order fields. No address, no timezone,
+    # no serialized Webform payload — those were settled server-side before
+    # checkout began.
+    dispatch_contact_details:
+      step: order_information
+      weight: 2
+    # The payment method itself (card details / stored method), collected here on
+    # the details step; the charge happens later on the hidden payment step.
+    payment_information:
+      step: order_information
+      weight: 3
+    # Retired: a courier job has no billing profile. A name-only address with no
+    # country stores as empty, so the name and phone live on order fields instead.
+    billing_information:
+      step: _disabled
+      weight: 4
+    # Kept. The review step is the standard trigger into the payment step, and it
+    # is where dispatch_contact_details' own pane summary is shown back before the
+    # card is charged.
+    review:
+      step: review
+      weight: 5
+    # Retired in favour of dispatch_payment_process. Named and disabled rather
+    # than omitted, because an omitted pane would otherwise reappear on its own
+    # default payment step and charge the card without confirming capacity first.
+    payment_process:
+      step: _disabled
+      weight: 6
+    # The one seam where money and capacity meet. capture: false makes it
+    # authorise only; the subclass confirms the Reservation and then captures.
+    dispatch_payment_process:
+      capture: false
+      step: payment
+      weight: 7
+    # Retired in favour of dispatch_confirmation, which says the booking is
+    # confirmed in the customer's own terms.
+    completion_message:
+      step: _disabled
+      weight: 8
+    # Step 4: the booking is confirmed. Reached only after the payment step
+    # authorised, confirmed, and captured.
+    dispatch_confirmation:
+      step: complete
+      weight: 9
+    # The order summary sidebar, unchanged from stock.
+    order_summary:
+      view: commerce_checkout_order_summary
+      step: _sidebar
+      weight: 10

@@ -4,6 +4,10 @@ namespace Drupal\Tests\custom_webform_handlers\Unit;
 
 use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Config\ImmutableConfig;
+use Drupal\custom_webform_handlers\Dispatch\DispatchReason;
+use Drupal\custom_webform_handlers\Dispatch\Profile\BookingMode;
+use Drupal\custom_webform_handlers\Dispatch\Profile\BookingProfile;
+use Drupal\custom_webform_handlers\Dispatch\Profile\BookingProfileResolverInterface;
 use Drupal\custom_webform_handlers\Distance\DistanceResult;
 use Drupal\custom_webform_handlers\Quote\QuoteCalculator;
 use Drupal\Tests\UnitTestCase;
@@ -22,7 +26,7 @@ final class QuoteCalculatorTest extends UnitTestCase {
       'quote.long_distance.base_cents' => 50000,
       'quote.long_distance.weight_distance_factor' => 0.00065,
       'quote.long_distance.fallback_weight_lbs' => [],
-    ]));
+    ]), $this->bookingProfiles());
     $distance = new DistanceResult(160934, 3600, 'test', 1234567890);
 
     $quote = $calculator->calculate([
@@ -45,7 +49,7 @@ final class QuoteCalculatorTest extends UnitTestCase {
       'quote.local_residential.round_trip_multiplier' => 2,
       'quote.local_residential.travel_hourly_cents' => 11000,
       'quote.fees.stairs_per_flight_cents' => 1750,
-    ]));
+    ]), $this->bookingProfiles());
     $distance = new DistanceResult(16093, 600, 'test', 1234567890);
 
     $quote = $calculator->calculate([
@@ -68,7 +72,7 @@ final class QuoteCalculatorTest extends UnitTestCase {
       'quote.long_distance.weight_distance_factor' => 0.00065,
       'quote.long_distance.dimensional_weight_divisor' => 139,
       'quote.long_distance.fallback_weight_lbs' => [],
-    ]));
+    ]), $this->bookingProfiles());
     $distance = new DistanceResult(160934, 3600, 'test', 1234567890);
 
     $quote = $calculator->calculate([
@@ -96,7 +100,7 @@ final class QuoteCalculatorTest extends UnitTestCase {
       'quote.long_distance.weight_distance_factor' => 0.00065,
       'quote.long_distance.dimensional_weight_divisor' => 139,
       'quote.long_distance.fallback_weight_lbs' => ['1_br' => 4000],
-    ]));
+    ]), $this->bookingProfiles());
     $distance = new DistanceResult(160934, 3600, 'test', 1234567890);
 
     $quote = $calculator->calculate([
@@ -120,7 +124,7 @@ final class QuoteCalculatorTest extends UnitTestCase {
       'quote.commercial.distance_threshold_miles' => 50,
       'quote.commercial.packing_unpacking_cents' => 32500,
       'quote.fees.packing_cents' => 32500,
-    ]));
+    ]), $this->bookingProfiles());
     $distance = new DistanceResult(16093, 600, 'test', 1234567890);
 
     $quote = $calculator->calculate([
@@ -146,7 +150,7 @@ final class QuoteCalculatorTest extends UnitTestCase {
       'quote.local_residential.travel_speed_mph' => 30,
       'quote.local_residential.round_trip_multiplier' => 2,
       'quote.local_residential.travel_hourly_cents' => 11000,
-    ]));
+    ]), $this->bookingProfiles());
     $distance = new DistanceResult(1, 0, 'test', 1234567890);
 
     $few_items = $calculator->calculate([
@@ -178,7 +182,7 @@ final class QuoteCalculatorTest extends UnitTestCase {
       'quote.commercial.base_cents' => 300000,
       'quote.commercial.distance_threshold_miles' => 50,
       'quote.commercial.after_hours_percent' => 20,
-    ]));
+    ]), $this->bookingProfiles());
     $distance = new DistanceResult(16093, 600, 'test', 1234567890);
 
     $quote = $calculator->calculate([
@@ -204,7 +208,7 @@ final class QuoteCalculatorTest extends UnitTestCase {
       'quote.diy_truck.excess_mileage_cents_per_mile' => 129,
       'quote.diy_truck.insurance_cents_per_day' => 3500,
       'quote.diy_truck.dolly_cents_per_day' => 2000,
-    ]));
+    ]), $this->bookingProfiles());
     $distance = new DistanceResult(160934, 3600, 'test', 1234567890);
 
     $quote = $calculator->calculate([
@@ -229,7 +233,7 @@ final class QuoteCalculatorTest extends UnitTestCase {
       'quote.local_residential.travel_speed_mph' => 30,
       'quote.local_residential.round_trip_multiplier' => 2,
       'quote.local_residential.travel_hourly_cents' => 11000,
-    ]));
+    ]), $this->bookingProfiles());
     $distance = new DistanceResult(1, 0, 'test', 1234567890);
 
     $quote = $calculator->calculate([
@@ -253,7 +257,7 @@ final class QuoteCalculatorTest extends UnitTestCase {
       'quote.local_residential.travel_speed_mph' => 30,
       'quote.local_residential.round_trip_multiplier' => 2,
       'quote.local_residential.travel_hourly_cents' => 11000,
-    ]));
+    ]), $this->bookingProfiles());
     $distance = new DistanceResult(1609, 300, 'test', 1234567890);
 
     $quote = $calculator->calculate([
@@ -276,7 +280,7 @@ final class QuoteCalculatorTest extends UnitTestCase {
       'quote.rate_version' => 'test-v1',
       'quote.commercial.base_cents' => 300000,
       'quote.commercial.distance_threshold_miles' => 50,
-    ]));
+    ]), $this->bookingProfiles());
     $distance = new DistanceResult(1609, 300, 'test', 1234567890);
 
     $quote = $calculator->calculate([
@@ -298,6 +302,43 @@ final class QuoteCalculatorTest extends UnitTestCase {
       ->with('custom_webform_handlers.settings')
       ->willReturn($config);
     return $factory;
+  }
+
+  /**
+   * A resolver that prices every service under its own name.
+   *
+   * QuoteCalculator now asks the service's BookingProfile which price book to
+   * apply instead of switching on the raw service_type. This stub answers with the
+   * resolver's documented default — the strategy *is* the service type — so every
+   * assertion below still exercises the same case label and the same arithmetic.
+   * Only quoteStrategy is meaningful here; the rest of the contract is filled with
+   * the fail-closed values, because the quote path reads nothing else.
+   */
+  private function bookingProfiles(): BookingProfileResolverInterface {
+    return new class() implements BookingProfileResolverInterface {
+
+      public function resolve(string $serviceType): BookingProfile {
+        $service = trim($serviceType);
+
+        return new BookingProfile(
+          $service,
+          BookingMode::ManualReview,
+          '',
+          'dispatch_slot',
+          [],
+          ['policy' => '', 'single_driver_service' => FALSE],
+          BookingProfile::DURATION_NONE,
+          ['resource_id' => '', 'capacity' => 0, 'claims_capacity' => FALSE],
+          $service,
+          [
+            'policy' => BookingProfile::REVIEW_OFFER_ASSESSED,
+            'message' => '',
+            'reason' => DispatchReason::ManualReview,
+          ],
+        );
+      }
+
+    };
   }
 
 }

@@ -11,3 +11,66 @@ custom_webform_handlers.quote_settings:
   parent: system.admin_config_services
   route_name: custom_webform_handlers.quote_settings
   weight: 101
+
+custom_webform_handlers.dispatch_settings:
+  title: 'Dispatch Planner Settings'
+  description: 'Configure the Resource, timezone, depot, working hours, breaks, blackouts, buffers, and self-service eligibility.'
+  parent: system.admin_config_services
+  route_name: custom_webform_handlers.dispatch_settings
+  weight: 102
+
+# Announcements are a separate link rather than a section of the settings form
+# above, because the two answer different questions and are changed at different
+# times: one says what the Resource can do, the other says who hears about it. The
+# description names the two things people most often come here to check.
+custom_webform_handlers.dispatch_notification_settings:
+  title: 'Dispatch Notifications'
+  description: 'Choose which events are announced, and the staff address the site writes to. Messages are sent on cron, never inside a booking.'
+  parent: system.admin_config_services
+  route_name: custom_webform_handlers.dispatch_notification_settings
+  weight: 103
+
+custom_webform_handlers.reservation_admin:
+  title: 'Webform reservations'
+  description: 'View, block, and release reserved time slots.'
+  parent: system.admin_content
+  route_name: custom_webform_handlers.reservation_admin
+  weight: 20
+
+# The board sits under Webform's own administration collection, beside the forms
+# whose submissions fill it, rather than under Configuration: it is not a settings
+# screen. The description says what an operator can do from it, because somebody
+# looking for the place to move a job should be able to find it from the menu.
+custom_webform_handlers.dispatch_planner:
+  title: 'Dispatch Planner board'
+  description: 'Confirmed Reservations, Holds, Blackouts, and quotes waiting on Manual Review, with the operations that act on them.'
+  parent: entity.webform.collection
+  route_name: custom_webform_handlers.dispatch_planner
+  weight: 30
+
+# Closures need an entry of their own because they need one on the board too: a
+# Blackout is drawn there as an occupied span carrying no identifier, so there is
+# nowhere on the board to hang a revision or a withdrawal. This is that somewhere.
+# The link carries no Resource, which the listing reads as the configured one.
+custom_webform_handlers.dispatch_blackouts:
+  title: 'Dispatch closures'
+  description: 'Withhold time on a Resource, and revise or lift a closure already in force.'
+  parent: entity.webform.collection
+  route_name: custom_webform_handlers.dispatch_blackouts
+  weight: 31
+
+# The read-only ledger listing, beside the board rather than instead of it. The link
+# is declared here rather than in the view's own 'menu' option so that all three
+# Dispatch entries live in one file: a view's menu setting is lost the moment somebody
+# re-saves it through the Views UI, and a link that disappears when a page is edited
+# is a page people stop finding.
+#
+# The description names what this page is for, because "reservations" alone does not
+# distinguish it from the board: the board answers "what does the day look like", and
+# this answers "show me the rows, filtered, in an order I chose".
+custom_webform_handlers.dispatch_reservations:
+  title: 'Reservation Dashboard'
+  description: 'Every row in the Dispatch reservation ledger, filtered by state, Resource, service form, or pickup date. Read-only.'
+  parent: entity.webform.collection
+  route_name: view.dispatch_reservations.page_1
+  weight: 32

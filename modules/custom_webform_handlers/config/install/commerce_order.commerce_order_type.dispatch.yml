@@ -1,0 +1,38 @@
+# The Commerce order type a dispatch job is paid through.
+#
+# Everything here is a reuse decision rather than a setting. The workflow is
+# Commerce's own order_fulfillment (draft -> fulfillment -> completed, with
+# cancel), because a courier job genuinely has a middle: payment places it, a
+# driver still has to do it, and it completes afterwards. A custom workflow
+# plugin would only restate that, and it would put a second state machine next
+# to the one Commerce already maintains.
+#
+# The number pattern is the existing order_default sequence, so dispatch orders
+# are numbered by the same facility as every other order rather than by a
+# counter this module would have to keep.
+#
+# The checkout_flow third-party setting (at the end of this file) binds this order
+# type to the dispatch checkout flow, so a dispatch order is paid through the flow
+# that authorises the card, confirms capacity under the Resource Calendar Guard,
+# and only then captures. commerce_checkout provides and validates that setting,
+# which is why it is declared as a module dependency here.
+langcode: en
+status: true
+dependencies:
+  module:
+    - commerce_checkout
+label: Dispatch
+id: dispatch
+workflow: order_fulfillment
+showOrderEditLinks: false
+numberPattern: order_default
+refresh_mode: customer
+refresh_frequency: 300
+sendReceipt: true
+receiptBcc: ''
+receiptSubject: ''
+traits: {  }
+locked: false
+third_party_settings:
+  commerce_checkout:
+    checkout_flow: dispatch

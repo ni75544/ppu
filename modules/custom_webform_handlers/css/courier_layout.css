@@ -1,0 +1,71 @@
+/**
+ * @file
+ * Layout polish for the simplified Express Courier journey.
+ *
+ * Webform's own flexbox stylesheet already does the real work: it turns a
+ * webform_flexbox row into columns from 768px up, leaves it stacked below that,
+ * owns the column gutter, and stretches inputs and selects to the column width.
+ * This file therefore adds nothing that would double up on it. It only styles the
+ * wrapper classes update_10027 introduces, and its one override exists because
+ * Webform sets white-space: nowrap on every checkbox inside a flex column, which
+ * a one-sentence attestation label cannot live with.
+ *
+ * A browser that never loads this file still shows a working, correctly ordered,
+ * single-column form: nothing here carries meaning, only spacing and emphasis.
+ */
+
+/* The confirmations column beside the weight field. */
+.custom-courier-handling > .form-item {
+  margin: 0 0 0.75rem;
+}
+
+.custom-courier-handling > .form-item:last-child {
+  margin-bottom: 0;
+}
+
+.custom-courier-attestation + label {
+  font-weight: 600;
+}
+
+/* The quote notice: a quiet collapsed block instead of a wall of open text. */
+.custom-courier-quote-info {
+  margin: 1.25rem 0;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgba(0, 0, 0, 0.15);
+  border-radius: 0.25rem;
+}
+
+.custom-courier-quote-info > summary {
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.custom-courier-quote-info h3 {
+  margin-top: 0;
+}
+
+.custom-courier-quote-info p {
+  margin: 0.5rem 0;
+}
+
+.custom-courier-quote-info p:last-child {
+  margin-bottom: 0;
+}
+
+@media (min-width: 768px) {
+  /*
+   * Webform keeps checkboxes and radios on one line inside a flex column. That is
+   * right for a short label and wrong for an attestation sentence or a two-option
+   * handling question, so it is relaxed for the Courier confirmations column only.
+   */
+  .custom-courier-handling .form-type-checkbox,
+  .custom-courier-handling .form-type-radio {
+    white-space: normal;
+  }
+}
+
+@media (prefers-color-scheme: dark) {
+  .custom-courier-quote-info {
+    border-color: rgba(255, 255, 255, 0.25);
+  }
+}

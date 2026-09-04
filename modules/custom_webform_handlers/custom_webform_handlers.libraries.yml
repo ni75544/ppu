@@ -1,18 +1,25 @@
+# Component libraries for the Webform quote experience.
+#
+# The calculator owns the preview request and the Maps bootstrap. The quote
+# summary renders independently of it (it can also read the hidden breakdown
+# element), while the route map consumes the calculator's route event and its
+# Maps bootstrap, so it declares that dependency.
+#
+# Bump the version only when the deployed asset content changes.
 distance_calculator:
-  version: 1.1.10
+  version: 1.1.12
   css:
     component:
       css/distance_calculator.css: {}
   js:
     js/distance_calculator.js: {}
   dependencies:
-    - core/jquery
     - core/drupal
     - core/drupalSettings
     - core/once
 
 quote_summary_sidebar:
-  version: 1.1.10
+  version: 1.1.11
   css:
     component:
       css/quote-summary-sidebar.css: {}
@@ -24,7 +31,7 @@ quote_summary_sidebar:
     - core/once
 
 route_map_preview:
-  version: 1.1.10
+  version: 1.1.11
   css:
     component:
       css/route-map-preview.css: {}
@@ -33,4 +40,106 @@ route_map_preview:
   dependencies:
     - custom_webform_handlers/distance_calculator
     - core/drupal
+    - core/drupalSettings
     - core/once
+
+# The reservation layer is independent of the quote experience: it neither reads
+# the calculator's events nor needs the Maps bootstrap, so it declares no
+# dependency on them and keeps working when they are absent.
+reservation_slots:
+  version: 1.3.0
+  css:
+    component:
+      css/reservation_slots.css: {}
+  js:
+    js/reservation_slots.js: {}
+  dependencies:
+    - core/drupal
+    - core/drupalSettings
+    - core/once
+
+reservation_admin:
+  version: 1.2.0
+  css:
+    component:
+      css/reservation_admin.css: {}
+  dependencies:
+    - core/drupal
+
+# The Dispatch Planner availability widget. Separate from reservation_slots rather
+# than an extension of it: the two workflows are mutually exclusive at runtime, and
+# only one of the two libraries is ever attached to a given form. Sharing assets
+# between them would let a change made for the fixed-slot dropdown alter what the
+# dispatch widget offers.
+#
+# Nothing here invents availability. Every arrival the widget can show was derived
+# by the server for this specific job, and the raw Hold token is never delivered to
+# the browser at all — it stays in the session receipt the server keeps.
+dispatch_slots:
+  version: 1.1.1
+  css:
+    component:
+      css/dispatch_slots.css: {}
+  js:
+    js/dispatch_slots.js: {}
+  dependencies:
+    - core/drupal
+    - core/drupalSettings
+    - core/once
+
+# The administrative Dispatch Planner board. CSS only, and deliberately so: the
+# board is a read-only picture of a schedule that has to be complete in the first
+# response, so nothing on it waits for a script. There is no behaviour to attach
+# and no drupalSettings to publish — publishing any would put schedule data into
+# the page for a script that does not exist.
+dispatch_planner_board:
+  version: 1.0.0
+  css:
+    component:
+      css/dispatch_planner_board.css: {}
+
+# The board's operations layer, attached only for an operator who holds the
+# permission the operations themselves require. It is an enhancement over links that
+# already work: every row it can drag also links to the Replan form that proves the
+# move, so a browser without this library loses a shortcut and no capability.
+#
+# It depends on the board library rather than duplicating it, because the states it
+# draws are tints of the board's own custom properties and its rules must cascade
+# after them.
+#
+# Two paths are published in drupalSettings and nothing else — the Replan endpoint
+# and Drupal's session token route. No schedule, no addresses, and no CSRF token:
+# the script asks for its own when it first needs one.
+dispatch_board_ops:
+  version: 1.0.0
+  css:
+    component:
+      css/dispatch_board_ops.css: {}
+  js:
+    js/dispatch_board_ops.js: {}
+  dependencies:
+    - custom_webform_handlers/dispatch_planner_board
+    - core/drupal
+    - core/drupalSettings
+    - core/once
+
+# The Express Courier service selector, restyled as an accessible radio-card
+# group. CSS only: it restyles the native radios that update_10016 produced and
+# adds no behaviour, so a browser without it still shows working radios and the
+# server remains the only source of service eligibility.
+service_cards:
+  version: 1.0.0
+  css:
+    component:
+      css/service_cards.css: {}
+
+# Spacing and emphasis for the simplified Express Courier layout. CSS only, and
+# deliberately thin: Webform's own flexbox stylesheet already turns each row into
+# columns from 768px up and stacks it below that, so this only styles the wrapper
+# classes update_10027 adds. A browser without it still shows the same fields, in
+# the same order, in one column.
+courier_layout:
+  version: 1.0.0
+  css:
+    component:
+      css/courier_layout.css: {}

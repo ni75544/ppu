@@ -1,0 +1,83 @@
+/**
+ * @file
+ * Accessible radio-card styling for the hg service_type selector.
+ *
+ * This file only restyles the native radio group that update_10016 produced; it
+ * adds no behaviour and creates no second source of service eligibility. The
+ * native radios stay in the DOM and keep working for keyboard and assistive
+ * technology, so a browser that never loads this stylesheet still shows a usable
+ * selector and the server remains authoritative. Selected and focused states are
+ * derived from the real input state (:checked / :focus-within), never from a
+ * scripted class, so they cannot drift from what will be submitted.
+ */
+
+.custom-service-cards .fieldset-wrapper,
+.custom-service-cards > div {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.75rem;
+}
+
+/* Each option is a card. Target both Webform's js-form-item wrapper and a plain
+   form-item so the layout survives markup differences between versions. */
+.custom-service-cards .js-form-type-radio,
+.custom-service-cards .form-type-radio,
+.custom-service-cards .form-item {
+  position: relative;
+  margin: 0;
+  padding: 1rem 1rem 1rem 2.75rem;
+  border: 1px solid var(--input--border-color, #8e929c);
+  border-radius: 0.5rem;
+  background: var(--color--white, #fff);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+/* Keep the native radio visible and operable, positioned as the card marker. */
+.custom-service-cards input[type="radio"] {
+  position: absolute;
+  top: 1.1rem;
+  left: 1rem;
+  margin: 0;
+}
+
+.custom-service-cards label {
+  display: block;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+/* Hover affordance on pointer devices only. */
+@media (hover: hover) {
+  .custom-service-cards .js-form-type-radio:hover,
+  .custom-service-cards .form-type-radio:hover,
+  .custom-service-cards .form-item:hover {
+    border-color: var(--color--primary, #1b98e0);
+  }
+}
+
+/* Selected state, derived from the real checked input. */
+.custom-service-cards .js-form-type-radio:has(input:checked),
+.custom-service-cards .form-type-radio:has(input:checked),
+.custom-service-cards .form-item:has(input:checked) {
+  border-color: var(--color--primary, #1b98e0);
+  box-shadow: inset 0 0 0 1px var(--color--primary, #1b98e0);
+  background: var(--color--primary-light, #e9f5fc);
+}
+
+/* Focus ring, derived from the real focused input, so keyboard users see the
+   same emphasis as the checked state. Falls back on browsers without :has(). */
+.custom-service-cards .js-form-type-radio:focus-within,
+.custom-service-cards .form-type-radio:focus-within,
+.custom-service-cards .form-item:focus-within {
+  outline: 2px solid var(--color--primary, #1b98e0);
+  outline-offset: 2px;
+}
+
+@media (forced-colors: active) {
+  .custom-service-cards .js-form-type-radio:has(input:checked),
+  .custom-service-cards .form-type-radio:has(input:checked),
+  .custom-service-cards .form-item:has(input:checked) {
+    border-color: Highlight;
+    box-shadow: inset 0 0 0 1px Highlight;
+  }
+}

@@ -5,3 +5,23 @@ core_version_requirement: ^10
 package: Custom
 dependencies:
   - drupal:webform
+  # Commerce owns the order, its state machine, its receipts, and its payments.
+  # Declared rather than checked at runtime: the dispatch order and order-item types
+  # this module ships are commerce_order config entities, so the module cannot be
+  # installed coherently without them.
+  - drupal:commerce_order
+  - drupal:commerce_price
+  - drupal:commerce_store
+  - drupal:commerce_number_pattern
+  # Checkout and payment own Steps 3-4. The dispatch checkout flow and its custom
+  # panes extend commerce_checkout, and the payment step authorises, confirms, and
+  # captures through commerce_payment's payment_process pane. Both are placed by
+  # these modules' plugin types, so the module cannot install coherently without them.
+  - drupal:commerce_checkout
+  - drupal:commerce_payment
+  # Views carries the read-only Reservation Dashboard: this module exposes the
+  # Dispatch reservation ledger through hook_views_data(), ships field handlers
+  # for its local times and its gated columns, and ships the view itself as
+  # config. Declared rather than optional, because the shipped view is a
+  # views.view config entity that cannot be installed without it.
+  - drupal:views

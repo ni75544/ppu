@@ -1,0 +1,86 @@
+administer custom webform reservations:
+  title: 'Administer Webform reservations'
+  description: 'View, block, and release custom Webform reservation slots.'
+  restrict access: true
+
+# Narrower than 'administer site configuration', which the quote settings use.
+# The operating profile is dispatch policy — working hours, depot, buffers — and
+# the people who own it are schedulers, who should not need full site
+# configuration rights to change when the business runs.
+administer dispatch planner:
+  title: 'Administer Dispatch Planner'
+  description: 'Configure the Dispatch Planner operating profile: Resource, timezone, depot, working hours, breaks, blackouts, buffers, booking horizon, and self-service eligibility.'
+  restrict access: true
+
+# Separate from the permission above, because reading a schedule and changing one
+# are different jobs. This grants the day-to-day operations: withholding time,
+# freeing capacity a claim holds, moving a Reservation to a proved new time, and
+# booking a request that needed staff approval. It grants no configuration rights,
+# so a dispatcher can run the board without being able to redefine working hours
+# or reopen a service to self-booking.
+manage dispatch schedule:
+  title: 'Manage the Dispatch schedule'
+  description: 'Withhold Resource time, release held or confirmed capacity, replan a Reservation onto a new proved time, and book requests held for staff review.'
+  restrict access: true
+
+# The four disclosure permissions below are specification item 7 and 8's split. Until
+# now the board was readable by whoever could configure the planner and mutable by
+# whoever could read it, and every column of a Reservation was visible to both. That is
+# one permission doing four jobs, and it makes "let the depot see the run sheet" mean
+# "let the depot see what everybody paid".
+#
+# So the split is by what is being disclosed, not by who is asking: seeing the board
+# at all, seeing a customer's contact detail, seeing where the van actually goes, and
+# seeing money. Each is granted on its own, none implies another, and the three roles
+# this module installs are just three combinations of them. A site that wants a fourth
+# combination writes a fourth role and needs no code.
+#
+# A fifth permission follows them, 'review dispatch quotes', and it is deliberately not
+# one of the four: it discloses nothing and authorises a mutation. It is grouped here
+# only because it is the other half of what item 7 asks for.
+#
+# Reading the board. The narrowest useful grant and the one every dispatch role needs:
+# what work exists, in what state, when. On its own it shows no contact detail, no
+# exact address, and no figure — which is what makes a read-only viewer possible at
+# all. 'administer dispatch planner' used to imply this and no longer does; the routes
+# accept either, so an existing configuration grant keeps working.
+view dispatch board:
+  title: 'View the Dispatch board'
+  description: 'Read the Dispatch board, the day and week views, and the queue of requests awaiting staff review. Shows no customer contact detail, no exact addresses, and no financial figures on its own.'
+  restrict access: true
+
+# Contact detail is the disclosure a dispatcher usually does not need and a customer
+# service desk always does. Kept apart from the board so the person moving vans around
+# is not also holding a list of names, addresses of record, and telephone numbers.
+view dispatch customer contact:
+  title: 'View Dispatch customer contact detail'
+  description: "Read the customer's name, email address, and telephone number on a Reservation or a Review Request."
+  restrict access: true
+
+# Exact addresses are separate from contact detail because they are a different risk.
+# A telephone number identifies somebody; a pickup and delivery address pair, repeated
+# across a day, is the route. Specification item 9 keeps that off every public page,
+# and this keeps it off the board for staff who have no reason to plan a journey.
+view dispatch exact addresses:
+  title: 'View exact Dispatch addresses'
+  description: 'Read the full pickup and delivery addresses of a job, rather than the distance and service summary alone.'
+  restrict access: true
+
+# Money. Order state, payment state, the amount taken, and the amount a member of
+# staff approved. Distinct from the authority to approve a quote in the first place:
+# 'review dispatch quotes' writes an offer, this reads what became of it, and a
+# scheduler who prices work is not automatically a person who may audit takings.
+view dispatch financial details:
+  title: 'View Dispatch financial details'
+  description: 'Read order and payment status, captured amounts, and approved quote figures for a job.'
+  restrict access: true
+
+# The staff pricing authority: taking a job off the queue, quoting it, declining it,
+# withdrawing it. Every one of these is a mutation of a Review Request and every one
+# is audited with the acting account, which is why it is a permission of its own and
+# not a corollary of reading the queue. It grants no capacity rights: approval is an
+# offer, and only a paid checkout schedules anything.
+review dispatch quotes:
+  title: 'Review and price Dispatch requests'
+  description: 'Take a request under review, approve it with an authoritative quote, decline it, or cancel it. Consumes no capacity and takes no payment.'
+  restrict access: true

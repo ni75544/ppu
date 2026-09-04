@@ -1,0 +1,212 @@
+/**
+ * @file
+ * The read-only Dispatch Planner board.
+ *
+ * Two renderings of one day, on purpose. The lane is a proportional picture of
+ * where the Resource's time went; the table beside it is the same facts as text.
+ * The lane is therefore decorative — it is hidden from assistive technology and
+ * from narrow viewports, because the table already carries everything it shows.
+ *
+ * No rule here depends on JavaScript. Segment geometry arrives as inline left and
+ * width percentages computed on the server, so the board is complete in the first
+ * response and stays correct with scripting off.
+ *
+ * Kind is never signalled by colour alone: every segment is labelled, and the
+ * table repeats the label in its own column.
+ */
+
+.cwh-dispatch-planner {
+  --cwh-lane-height: 3.25rem;
+  --cwh-hold: #7a6410;
+  --cwh-blackout: #6b1d1d;
+  --cwh-window: #1a4f7a;
+  --cwh-margin: #4a5a68;
+}
+
+.cwh-dispatch-planner__day {
+  margin: 0 0 2rem;
+}
+
+.cwh-dispatch-planner__date {
+  margin: 0 0 0.25rem;
+  font-size: 1.08rem;
+}
+
+.cwh-dispatch-planner__legacy {
+  margin: 0 0 0.5rem;
+  padding: 0.35rem 0.6rem;
+  border-left: 4px solid var(--cwh-blackout);
+  background: #fcf4f4;
+  font-size: 0.9rem;
+}
+
+.cwh-dispatch-planner__lane {
+  position: relative;
+  height: var(--cwh-lane-height);
+  margin: 0 0 0.75rem;
+  border: 1px solid #b8bfc5;
+  background-color: #fbfcfd;
+  background-image: repeating-linear-gradient(
+    to right,
+    #dfe4e8 0,
+    #dfe4e8 1px,
+    transparent 1px,
+    transparent 4.1666%
+  );
+  overflow: hidden;
+}
+
+.cwh-dispatch-planner__hours {
+  display: flex;
+  justify-content: space-between;
+  margin: 0 0 0.2rem;
+  color: #545b62;
+  font-size: 0.72rem;
+}
+
+.cwh-dispatch-planner__segment {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  box-sizing: border-box;
+  min-width: 2px;
+  padding: 0.15rem 0.25rem;
+  border-right: 1px solid rgba(255, 255, 255, 0.65);
+  color: #fff;
+  font-size: 0.7rem;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cwh-dispatch-planner__segment--window {
+  background: var(--cwh-window);
+}
+
+.cwh-dispatch-planner__segment--margin {
+  background: var(--cwh-margin);
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(255, 255, 255, 0.22) 0,
+    rgba(255, 255, 255, 0.22) 3px,
+    transparent 3px,
+    transparent 6px
+  );
+}
+
+.cwh-dispatch-planner__segment--hold {
+  background: var(--cwh-hold);
+}
+
+.cwh-dispatch-planner__segment--blackout {
+  background: var(--cwh-blackout);
+}
+
+.cwh-dispatch-planner__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem 1rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+  font-size: 0.82rem;
+}
+
+.cwh-dispatch-planner__legend li::before {
+  display: inline-block;
+  width: 0.85rem;
+  height: 0.85rem;
+  margin-right: 0.35rem;
+  border: 1px solid #7d858c;
+  vertical-align: -0.1rem;
+  content: '';
+}
+
+.cwh-dispatch-planner__legend .cwh-legend--window::before {
+  background: var(--cwh-window);
+}
+
+.cwh-dispatch-planner__legend .cwh-legend--margin::before {
+  background: var(--cwh-margin);
+}
+
+.cwh-dispatch-planner__legend .cwh-legend--hold::before {
+  background: var(--cwh-hold);
+}
+
+.cwh-dispatch-planner__legend .cwh-legend--blackout::before {
+  background: var(--cwh-blackout);
+}
+
+.cwh-dispatch-planner__tablewrap {
+  overflow-x: auto;
+}
+
+.cwh-dispatch-planner__queue {
+  margin-top: 2rem;
+  padding-top: 0.5rem;
+  border-top: 2px solid #b8bfc5;
+}
+
+.cwh-dispatch-planner__meta {
+  margin: 0 0 1rem;
+  color: #444b51;
+  font-size: 0.85rem;
+}
+
+.cwh-dispatch-planner__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  margin: 0 0 1rem;
+  font-size: 0.9rem;
+}
+
+/*
+ * The operations on one Reservation, on its own page.
+ *
+ * This lives here rather than in the operations layer's stylesheet because the
+ * detail page attaches only this library: the section is rendered by the server for
+ * an operator who may act, and each control in it is a link to a page that proves
+ * its own work. Nothing below waits for a script, and there is nothing to hide when
+ * one never arrives.
+ */
+.cwh-dispatch-planner__operations {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 0.75rem;
+  margin: 1.5rem 0 0;
+  padding-top: 1rem;
+  border-top: 2px solid #b8bfc5;
+}
+
+/*
+ * The heading is the whole width of the row, so the controls wrap beneath it rather
+ * than trailing after it.
+ */
+.cwh-dispatch-planner__operations > h3 {
+  flex: 0 0 100%;
+  margin: 0;
+  font-size: 1rem;
+}
+
+/*
+ * Narrow viewports drop the picture, not the information: the lane is a
+ * proportional summary of the table beside it, so hiding it costs nothing that
+ * cannot still be read.
+ */
+@media (max-width: 48em) {
+  .cwh-dispatch-planner__lane,
+  .cwh-dispatch-planner__hours,
+  .cwh-dispatch-planner__legend {
+    display: none;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .cwh-dispatch-planner__segment {
+    border: 1px solid #000;
+  }
+}

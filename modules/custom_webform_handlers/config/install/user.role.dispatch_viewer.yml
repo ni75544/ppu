@@ -1,0 +1,28 @@
+# The read-only role: one permission, and that is the whole of it.
+#
+# Specification item 7's second role, and the one that proves the split in item 8 was
+# worth making. Before it, "let the depot look at the board" could only be granted by
+# handing over a permission that also let them change it and read every figure on it.
+#
+# 'view dispatch board' on its own shows what work exists, in what state, and when.
+# It shows no customer contact detail, no exact addresses, no order or payment status,
+# and no approved quote — not because this role is filtered afterwards, but because
+# those four disclosures are four other permissions it does not hold.
+#
+# There is deliberately nothing else here. A depot screen, a driver's phone, an
+# operations dashboard, a manager who wants to see load without being able to move
+# anything: all of them are this role, and none of them needs a second permission to
+# be useful. If a viewer turns out to need one of the disclosures, it is granted on
+# its own and named in the grant, rather than by promoting them to a role that can
+# also cancel somebody's booking.
+langcode: en
+status: true
+dependencies:
+  module:
+    - custom_webform_handlers
+id: dispatch_viewer
+label: 'Dispatch Viewer'
+weight: 6
+is_admin: false
+permissions:
+  - 'view dispatch board'

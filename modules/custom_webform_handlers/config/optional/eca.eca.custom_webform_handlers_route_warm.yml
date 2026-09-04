@@ -1,0 +1,28 @@
+langcode: en
+status: true
+dependencies:
+  module:
+    - custom_webform_handlers
+    - eca
+id: custom_webform_handlers_route_warm
+modeller: fallback
+label: 'Dispatch: warm a confirmed Reservation''s route'
+version: 1.0.0
+weight: 0
+events:
+  event_reservation_confirmed:
+    plugin: 'custom_webform_handlers_dispatch_domain_event:reservation_confirmed'
+    label: 'Dispatch Reservation confirmed'
+    configuration: {  }
+    successors:
+      -
+        id: action_enqueue_route_warm
+        condition: ''
+conditions: {  }
+gateways: {  }
+actions:
+  action_enqueue_route_warm:
+    plugin: custom_webform_handlers_enqueue_route_warm
+    label: 'Enqueue dispatch route warming'
+    configuration: {  }
+    successors: {  }

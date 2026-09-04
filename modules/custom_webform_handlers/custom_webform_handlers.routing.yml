@@ -14,6 +14,32 @@ custom_webform_handlers.quote_settings:
   requirements:
     _permission: 'administer site configuration'
 
+# The Dispatch Planner operating profile. Gated on its own narrower permission
+# rather than site configuration, because schedulers own this policy.
+custom_webform_handlers.dispatch_settings:
+  path: '/admin/config/services/custom-webform-handlers/dispatch'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\DispatchPlannerSettingsForm'
+    _title: 'Dispatch Planner settings'
+  requirements:
+    _permission: 'administer dispatch planner'
+
+# Who is told, and what they are told. Nested under the dispatch settings path
+# because it is the same policy owner: a recipient list and a message template are
+# scheduling policy, not site configuration, so they answer to the same permission
+# as the operating profile rather than to 'administer site configuration'.
+#
+# This route configures announcements only. Nothing reachable from it can withhold
+# a minute of capacity or move a booking, which is why it is safe for it to sit at
+# the settings permission while the status report below needs the schedule one.
+custom_webform_handlers.dispatch_notification_settings:
+  path: '/admin/config/services/custom-webform-handlers/dispatch/notifications'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\DispatchNotificationSettingsForm'
+    _title: 'Dispatch notifications'
+  requirements:
+    _permission: 'administer dispatch planner'
+
 custom_webform_handlers.distance_preview:
   path: '/custom-webform-handlers/distance-preview'
   defaults:
@@ -22,3 +48,463 @@ custom_webform_handlers.distance_preview:
   requirements:
     _access: 'TRUE'
     _csrf_request_header_token: 'TRUE'
+
+# The Dispatch Planner booking endpoints. Four operations, no more: what is
+# offerable, claim one, extend the claim, give it up. Confirmation is deliberately
+# absent — a Reservation is created by the Webform submission that owns it, on the
+# server, and never by a request a browser can make.
+#
+# All four are POST. Offer carries the visitor's current unsaved answers, because
+# what is offerable depends on the job; a query string would log and cache them.
+# Being POST also puts all four under one CSRF rule rather than two.
+#
+# No route accepts or returns a hold token. A Hold is named by the pickup-arrival
+# instant it was taken for, and the token lives in the session.
+#
+# Every one of the four carries the booking-workflow requirement, which refuses the
+# route unless the Dispatch Planner actually owns the Webform in the path. It is an
+# early guard, not the guard: the controller consults the same authority again, so
+# the interlock does not depend on a route declaration staying correct.
+custom_webform_handlers.dispatch_offer:
+  path: '/custom-webform-handlers/dispatch/offer/{webform}'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\DispatchController::offer'
+  methods: [POST]
+  requirements:
+    _access: 'TRUE'
+    _csrf_request_header_token: 'TRUE'
+    _custom_webform_handlers_booking_workflow: 'dispatch'
+    webform: '[a-z0-9_]+'
+
+custom_webform_handlers.dispatch_hold:
+  path: '/custom-webform-handlers/dispatch/hold/{webform}'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\DispatchController::hold'
+  methods: [POST]
+  requirements:
+    _access: 'TRUE'
+    _csrf_request_header_token: 'TRUE'
+    _custom_webform_handlers_booking_workflow: 'dispatch'
+    webform: '[a-z0-9_]+'
+
+custom_webform_handlers.dispatch_renew:
+  path: '/custom-webform-handlers/dispatch/renew/{webform}'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\DispatchController::renew'
+  methods: [POST]
+  requirements:
+    _access: 'TRUE'
+    _csrf_request_header_token: 'TRUE'
+    _custom_webform_handlers_booking_workflow: 'dispatch'
+    webform: '[a-z0-9_]+'
+
+custom_webform_handlers.dispatch_release:
+  path: '/custom-webform-handlers/dispatch/release/{webform}'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\DispatchController::release'
+  methods: [POST]
+  requirements:
+    _access: 'TRUE'
+    _csrf_request_header_token: 'TRUE'
+    _custom_webform_handlers_booking_workflow: 'dispatch'
+    webform: '[a-z0-9_]+'
+
+# The two fixed-slot reads carry the same requirement for the other workflow, so a
+# Webform that has been transferred to the planner stops disclosing fixed-slot
+# availability at the router. The three fixed-slot mutations below name their
+# Webform in the request body, where a route requirement cannot see it, so those
+# are guarded in the controller only.
+custom_webform_handlers.reservation_availability:
+  path: '/custom-webform-handlers/reservation/availability/{webform}'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\ReservationController::availability'
+  methods: [GET]
+  requirements:
+    _access: 'TRUE'
+    _custom_webform_handlers_booking_workflow: 'legacy'
+    webform: '[a-z0-9_]+'
+
+# Per-day capacity for a bounded range. A read, so a GET, and it returns counts
+# only — never a token, owner, hash, or reservation identifier.
+custom_webform_handlers.reservation_calendar:
+  path: '/custom-webform-handlers/reservation/calendar/{webform}'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\ReservationController::calendar'
+  methods: [GET]
+  requirements:
+    _access: 'TRUE'
+    _custom_webform_handlers_booking_workflow: 'legacy'
+    webform: '[a-z0-9_]+'
+
+custom_webform_handlers.reservation_hold:
+  path: '/custom-webform-handlers/reservation/hold'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\ReservationController::hold'
+  methods: [POST]
+  requirements:
+    _access: 'TRUE'
+    _csrf_request_header_token: 'TRUE'
+
+custom_webform_handlers.reservation_release:
+  path: '/custom-webform-handlers/reservation/release'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\ReservationController::release'
+  methods: [POST]
+  requirements:
+    _access: 'TRUE'
+    _csrf_request_header_token: 'TRUE'
+
+# Extends a Hold while its form is still being filled in. Same access and CSRF
+# posture as hold and release: it mutates a reservation row, so it is a POST
+# carrying the request-header CSRF token, never a GET.
+custom_webform_handlers.reservation_renew:
+  path: '/custom-webform-handlers/reservation/renew'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\ReservationController::renew'
+  methods: [POST]
+  requirements:
+    _access: 'TRUE'
+    _csrf_request_header_token: 'TRUE'
+
+# The administrative surface. Every route is gated on one restricted permission,
+# and the block route is declared before the detail route so its literal path is
+# never swallowed by the numeric {reservation_id} pattern.
+custom_webform_handlers.reservation_admin:
+  path: '/admin/content/webform-reservations'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\ReservationAdminController::overview'
+    _title: 'Webform reservations'
+  requirements:
+    _permission: 'administer custom webform reservations'
+
+custom_webform_handlers.reservation_admin_block:
+  path: '/admin/content/webform-reservations/block'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\ReservationBlockSlotForm'
+    _title: 'Block reservation slot'
+  requirements:
+    _permission: 'administer custom webform reservations'
+
+custom_webform_handlers.reservation_admin_detail:
+  path: '/admin/content/webform-reservations/{reservation_id}'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\ReservationAdminController::detail'
+    _title: 'Reservation'
+  requirements:
+    _permission: 'administer custom webform reservations'
+    reservation_id: '\d+'
+
+custom_webform_handlers.reservation_admin_release:
+  path: '/admin/content/webform-reservations/{reservation_id}/release'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\ReservationReleaseForm'
+    _title: 'Release reservation slot'
+  requirements:
+    _permission: 'administer custom webform reservations'
+    reservation_id: '\d+'
+
+# Historical reconciliation. Declared before the numeric {reservation_id} detail
+# route so its literal path segment is never swallowed by that pattern, and
+# gated on the same restricted permission as the rest of the dashboard.
+custom_webform_handlers.reservation_admin_protect:
+  path: '/admin/content/webform-reservations/protect/{webform}/{sid}'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\ReservationProtectHistoricalForm'
+    _title: 'Protect historical booking'
+  requirements:
+    _permission: 'administer custom webform reservations'
+    webform: '[a-z0-9_]+'
+    sid: '\d+'
+
+# The read-only Dispatch Planner board. Every route in this block is GET-only and
+# gated on 'administer dispatch planner', and every one of them reaches the
+# schedule through DispatchBoardReaderInterface, which cannot claim, confirm,
+# release, renew, or black out anything.
+#
+# Reading the board and changing it are separate permissions on separate routes,
+# and that separation is the point. Nothing in this block mutates capacity, so a
+# GET can never move work; the staff operations further down are gated on
+# 'manage dispatch schedule' and reach the same rows only through the planner and
+# the Resource Calendar Guard, which is the serialization every path shares.
+#
+# The board read is 'view dispatch board' as of specification item 8, which is the
+# permission a read-only Dispatch Viewer holds and the only dispatch permission it
+# holds. 'administer dispatch planner' is accepted alongside it, so an account that
+# could already configure the planner did not lose the board when the grant was split
+# out of it. What the page then shows depends on three further permissions the
+# controller checks per field, not on which of these two got it in.
+#
+# The separator is load-bearing and the two are not interchangeable: core's
+# PermissionAccessCheck reads a comma as AND and a plus as OR. Written with a comma
+# this line demands both permissions at once, which is the opposite of what it is for
+# — it would lock out the very read-only role the split created, and lock out every
+# existing administrator who holds only the broad grant. A plus is what makes it
+# "either of these".
+custom_webform_handlers.dispatch_planner:
+  path: '/admin/structure/webform/dispatch-planner'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\DispatchPlannerAdminController::board'
+    _title: 'Dispatch Planner'
+  methods: [GET]
+  requirements:
+    _permission: 'view dispatch board+administer dispatch planner'
+
+# The literal spans are declared before the numeric detail route below, so their
+# path segments can never be read as an identifier by a future pattern change.
+custom_webform_handlers.dispatch_planner_day:
+  path: '/admin/structure/webform/dispatch-planner/day'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\DispatchPlannerAdminController::day'
+    _title: 'Dispatch Planner: one day'
+  methods: [GET]
+  requirements:
+    _permission: 'view dispatch board+administer dispatch planner'
+
+custom_webform_handlers.dispatch_planner_week:
+  path: '/admin/structure/webform/dispatch-planner/week'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\DispatchPlannerAdminController::week'
+    _title: 'Dispatch Planner: one week'
+  methods: [GET]
+  requirements:
+    _permission: 'view dispatch board+administer dispatch planner'
+
+# Detail for one confirmed Reservation. The identifier is constrained to digits
+# here as well as being checked in the controller: a Hold and a missing row are
+# both answered with 404, so this page cannot be used to probe which identifiers
+# exist as unfinished anonymous attempts.
+custom_webform_handlers.dispatch_planner_reservation:
+  path: '/admin/structure/webform/dispatch-planner/reservation/{dispatch_reservation_id}'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\DispatchPlannerAdminController::reservation'
+    _title: 'Dispatch reservation'
+  methods: [GET]
+  requirements:
+    _permission: 'view dispatch board+administer dispatch planner'
+    dispatch_reservation_id: '\d+'
+
+# Staff operations on the Dispatch Planner. Everything below changes capacity, so
+# everything below is gated on 'manage dispatch schedule' and reaches the rows
+# only through DispatchOperations, which owns no algorithm of its own: it hands
+# every decision to the planner and the storage seam, inside their locks.
+#
+# Every mutation is a POST. The Form API routes accept GET as well because a form
+# has to be rendered before it can be submitted, but the GET builds a page and
+# nothing else — the submit handler is the only thing that writes, and Drupal's
+# form token is what proves the POST came from that page. The one non-form route
+# is POST-only and carries the request-header CSRF token.
+#
+# The literal 'blackouts' and 'replan' segments are declared here rather than
+# under the numeric reservation pattern above, so no future pattern change can
+# read one of them as an identifier.
+custom_webform_handlers.dispatch_blackouts:
+  path: '/admin/structure/webform/dispatch-planner/blackouts'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\DispatchOperationsController::blackouts'
+    _title: 'Dispatch blackouts'
+  methods: [GET]
+  requirements:
+    _permission: 'manage dispatch schedule'
+
+custom_webform_handlers.dispatch_blackout_add:
+  path: '/admin/structure/webform/dispatch-planner/blackouts/add'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\DispatchBlackoutForm'
+    _title: 'Withhold Resource time'
+  methods: [GET, POST]
+  requirements:
+    _permission: 'manage dispatch schedule'
+
+custom_webform_handlers.dispatch_blackout_edit:
+  path: '/admin/structure/webform/dispatch-planner/blackouts/{dispatch_blackout_id}/edit'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\DispatchBlackoutForm'
+    _title: 'Revise a Blackout'
+  methods: [GET, POST]
+  requirements:
+    _permission: 'manage dispatch schedule'
+    dispatch_blackout_id: '\d+'
+
+custom_webform_handlers.dispatch_blackout_withdraw:
+  path: '/admin/structure/webform/dispatch-planner/blackouts/{dispatch_blackout_id}/withdraw'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\DispatchBlackoutWithdrawForm'
+    _title: 'Lift a Blackout'
+  methods: [GET, POST]
+  requirements:
+    _permission: 'manage dispatch schedule'
+    dispatch_blackout_id: '\d+'
+
+# Releasing names a claim rather than a Reservation, because a live Hold can be
+# released too and a Hold is not a Reservation. The form discloses only what the
+# board already discloses about one.
+custom_webform_handlers.dispatch_claim_release:
+  path: '/admin/structure/webform/dispatch-planner/claim/{dispatch_reservation_id}/release'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\DispatchReservationReleaseForm'
+    _title: 'Free reserved capacity'
+  methods: [GET, POST]
+  requirements:
+    _permission: 'manage dispatch schedule'
+    dispatch_reservation_id: '\d+'
+
+custom_webform_handlers.dispatch_reservation_replan:
+  path: '/admin/structure/webform/dispatch-planner/reservation/{dispatch_reservation_id}/replan'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\DispatchReplanForm'
+    _title: 'Move a Reservation'
+  methods: [GET, POST]
+  requirements:
+    _permission: 'manage dispatch schedule'
+    dispatch_reservation_id: '\d+'
+
+# The only way a Manual Review request gets capacity. It consumes none until this
+# form is submitted, and submitting it runs the same planner confirmation
+# transaction a visitor's booking runs.
+custom_webform_handlers.dispatch_manual_review_confirm:
+  path: '/admin/structure/webform/dispatch-planner/queue/{dispatch_submission_id}/book'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\DispatchManualReviewConfirmForm'
+    _title: 'Book a request staff must approve'
+  methods: [GET, POST]
+  requirements:
+    _permission: 'manage dispatch schedule'
+    dispatch_submission_id: '\d+'
+
+# The board's drag handler posts here. It carries a Reservation identifier and a
+# proposed local date and time, and there is no field in the payload for a
+# Dispatch Window, a duration, a route or a repositioning figure: the server
+# derives all of those from the Reservation's own submission. POST-only, and the
+# request-header CSRF token is required, so no link and no GET can reach it.
+custom_webform_handlers.dispatch_replan_endpoint:
+  path: '/admin/structure/webform/dispatch-planner/replan'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\DispatchOperationsController::replanEndpoint'
+  methods: [POST]
+  requirements:
+    _permission: 'manage dispatch schedule'
+    _csrf_request_header_token: 'TRUE'
+
+# Reporting what the Resource is doing. Gated on 'manage dispatch schedule' even
+# though a report changes no capacity, because the audit row it writes asserts that
+# a named member of staff observed something, and an account that may not touch the
+# schedule has no standing to make that assertion.
+#
+# A single literal segment, so it cannot be read as an identifier by any pattern in
+# this file. The Resource travels as a query parameter rather than a path argument:
+# the form resolves it against the operating profile and answers 404 for anything
+# else, so there is no identifier here to enumerate.
+custom_webform_handlers.dispatch_resource_status:
+  path: '/admin/structure/webform/dispatch-planner/status'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\DispatchResourceStatusForm'
+    _title: 'Report Resource status'
+  methods: [GET, POST]
+  requirements:
+    _permission: 'manage dispatch schedule'
+
+# ---------------------------------------------------------------------------
+# Review Requests: the customer's tracker, and the staff decisions.
+# ---------------------------------------------------------------------------
+
+# The tracking page, and the only route in this file open to anybody at all.
+#
+# _access: 'TRUE' is not an absence of access control; the credential in the path is
+# the access control, and it is 192 bits from the system's cryptographic source. What
+# this route must not do is behave differently for a code that exists and a code that
+# does not, which is specification item 4. Two things arrange that. The pattern below
+# bounds the segment to the character set a code is drawn from, so a malformed value
+# is answered by the router with the site's ordinary 404 — and an unknown code is
+# answered by the controller with the same 404 through the same exception. Neither
+# says which it was.
+#
+# no_cache is what keeps a tracker off Drupal's internal page cache. It is not the whole
+# of item 4: no-store on the response is written by ReviewTrackerCacheSubscriber, which
+# runs on the response event below core's own header pass, because the page is about one
+# customer's job and must not be held by a shared proxy or restored from a browser's
+# back-forward cache after a link is forwarded. Neither this route nor the controller can
+# deliver that header on its own — core would overwrite it on the way out.
+custom_webform_handlers.review_track:
+  path: '/quote/track/{code}'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\ReviewTrackController::track'
+    _title: 'Your quote'
+  methods: [GET]
+  options:
+    no_cache: TRUE
+  requirements:
+    _access: 'TRUE'
+    code: '[A-Za-z0-9_\-]+'
+
+# Accepting the offer. A form rather than a link, deliberately.
+#
+# Paying opens a Commerce order and takes a Hold on capacity, so it is a mutation, and
+# a mutation reached by GET is one a prefetching browser, a link scanner, or a mail
+# client can perform by looking at the page. The GET here renders a confirmation with
+# the figure on it and the POST is Form API, so the act of paying carries a token and
+# happens only because somebody pressed a button.
+custom_webform_handlers.review_pay:
+  path: '/quote/track/{code}/pay'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\ReviewPaymentForm'
+    _title: 'Accept and pay'
+  methods: [GET, POST]
+  options:
+    no_cache: TRUE
+  requirements:
+    _access: 'TRUE'
+    code: '[A-Za-z0-9_\-]+'
+
+# The four staff decisions. All Form API, all POST to act, all gated on the pricing
+# permission rather than on the schedule one: quoting a job is not moving a van, and
+# specification item 7 gives the read-only viewer neither.
+#
+# There is no queue route here. The queue is the Dispatch board's existing Manual
+# Review section, now read from the Review Requests themselves per item 6, and these
+# routes are what its links point at. A second list of the same work would be a second
+# place for it to be wrong.
+custom_webform_handlers.review_begin:
+  path: '/admin/structure/webform/dispatch-planner/review/{review_id}/begin'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\ReviewBeginForm'
+    _title: 'Take this request under review'
+  methods: [GET, POST]
+  requirements:
+    _permission: 'review dispatch quotes'
+    review_id: '\d+'
+
+custom_webform_handlers.review_approve:
+  path: '/admin/structure/webform/dispatch-planner/review/{review_id}/approve'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\ReviewApproveForm'
+    _title: 'Approve with a quote'
+  methods: [GET, POST]
+  requirements:
+    _permission: 'review dispatch quotes'
+    review_id: '\d+'
+
+# Declining and cancelling are one form class given two routes, because they differ in
+# what they mean and not in what they collect. The decision travels as a route default,
+# which no request can set, so the form still cannot be told which transition to make
+# by anybody typing.
+custom_webform_handlers.review_decline:
+  path: '/admin/structure/webform/dispatch-planner/review/{review_id}/decline'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\ReviewWithdrawForm'
+    _title: 'Decline this request'
+    review_decision: 'decline'
+  methods: [GET, POST]
+  requirements:
+    _permission: 'review dispatch quotes'
+    review_id: '\d+'
+
+custom_webform_handlers.review_cancel:
+  path: '/admin/structure/webform/dispatch-planner/review/{review_id}/cancel'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\ReviewWithdrawForm'
+    _title: 'Cancel this request'
+    review_decision: 'cancel'
+  methods: [GET, POST]
+  requirements:
+    _permission: 'review dispatch quotes'
+    review_id: '\d+'

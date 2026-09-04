@@ -1,0 +1,210 @@
+/**
+ * @file
+ * Booked time-slot state for the reservation behavior.
+ *
+ * These rules are presentation only. A booked option is already disabled and
+ * marked in the DOM by js/reservation_slots.js, and the server refuses a taken
+ * Slot regardless of what any of this looks like. The colour exists so a visitor
+ * can see at a glance which times are gone rather than discovering it at
+ * submission.
+ *
+ * The control-level class is what makes the disabled options styleable: several
+ * browsers ignore colour on a bare option:disabled inside a closed select, so
+ * the state is carried on the select as well.
+ */
+
+.custom-reservation-time--has-booked-options {
+  border-color: #b42318;
+}
+
+/**
+ * A time the server reported as taken.
+ *
+ * Keyed on the data attribute the behavior sets, not on a bare
+ * `option:disabled` under a control-level class. A single control can now carry
+ * booked options and unknown-state options at the same time — that is what a
+ * failed refresh over a previously-read day looks like — and a shared
+ * `option:disabled` rule painted both in whichever colour was declared last.
+ */
+.custom-reservation-slot--booked,
+option[data-reservation-booked],
+.custom-reservation-time--has-booked-options option[data-reservation-booked] {
+  color: #8a1c1c;
+  background-color: #fbeaea;
+  font-weight: 700;
+}
+
+/* A failed availability read is deliberately fail-closed. This state is not
+ * labelled Booked because the server has not identified the owner; it is still
+ * visibly inactive until the next authoritative response arrives. */
+.custom-reservation-slot--unavailable,
+option[data-reservation-unavailable],
+.custom-reservation-time--availability-unavailable option[data-reservation-unavailable] {
+  color: #4b5563;
+  background-color: #e5e7eb;
+}
+
+.custom-reservation-time--availability-unavailable {
+  border-color: #6b7280;
+}
+
+.custom-reservation-status {
+  color: #8a1c1c;
+}
+
+/**
+ * A day on which every configured time is taken.
+ *
+ * A native date input draws its own calendar, so this cannot disable the day —
+ * it marks the control while the behavior clears the unusable value and
+ * announces the reason. The server remains the authority on every date.
+ */
+.custom-reservation-date--fully-booked {
+  border-color: #b42318;
+  background-color: #fbeaea;
+}
+
+/**
+ * The module's own month grid.
+ *
+ * It exists because a native date input draws its calendar itself and will not
+ * let a page style or disable individual days in it. The native input stays in
+ * the markup as the no-JavaScript fallback and remains the element that submits
+ * the value; this grid only writes into it.
+ *
+ * Colour is never the sole signal: every day also carries a word or a count in
+ * text, and the same fact again in its accessible name.
+ */
+.custom-reservation-calendar {
+  max-width: 26rem;
+  margin: 0.5rem 0 1rem;
+  padding: 0.75rem;
+  border: 1px solid #d1d5db;
+  border-radius: 0.35rem;
+  background: #fff;
+}
+
+.custom-reservation-calendar__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.custom-reservation-calendar__caption {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 700;
+}
+
+.custom-reservation-calendar__nav {
+  min-width: 2.25rem;
+  min-height: 2.25rem;
+  padding: 0 0.6rem;
+  border: 1px solid #9aa1a9;
+  border-radius: 0.25rem;
+  background: #f3f4f6;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.custom-reservation-calendar__nav[disabled] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.custom-reservation-calendar__row {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.custom-reservation-calendar__weekday {
+  padding: 0.25rem 0;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-align: center;
+  text-transform: uppercase;
+  color: #4b5563;
+}
+
+.custom-reservation-calendar__cell {
+  display: block;
+}
+
+.custom-reservation-calendar__day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 2.9rem;
+  padding: 0.15rem;
+  border: 1px solid #cbd5e1;
+  border-radius: 0.2rem;
+  background: #f8fafc;
+  font: inherit;
+  line-height: 1.1;
+  cursor: pointer;
+}
+
+.custom-reservation-calendar__number {
+  font-weight: 700;
+}
+
+.custom-reservation-calendar__note {
+  font-size: 0.62rem;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+/* Free hours remain. Selectable, and said so in the note text. */
+.custom-reservation-calendar__day--open {
+  border-color: #2e7d32;
+  background: #e8f5e9;
+  color: #14532d;
+}
+
+/* No free hours. Kept focusable on purpose — a disabled button cannot be
+ * reached by keyboard, and a keyboard user must still be able to move across a
+ * full day and hear that it is full. Activation is refused in the behavior. */
+.custom-reservation-calendar__day--full {
+  border-color: #b42318;
+  background: #fbeaea;
+  color: #741b1b;
+  cursor: not-allowed;
+  text-decoration: line-through;
+}
+
+.custom-reservation-calendar__day--closed,
+.custom-reservation-calendar__day--outside {
+  border-color: #d1d5db;
+  background: #f1f3f5;
+  color: #6b7280;
+  cursor: not-allowed;
+}
+
+.custom-reservation-calendar__day--unknown {
+  border-style: dashed;
+  color: #6b7280;
+  cursor: progress;
+}
+
+.custom-reservation-calendar__day--selected {
+  outline: 3px solid #1d4ed8;
+  outline-offset: 1px;
+}
+
+.custom-reservation-calendar__day:focus-visible {
+  outline: 3px solid #1d4ed8;
+  outline-offset: 1px;
+}
+
+.custom-reservation-calendar__status,
+.custom-reservation-calendar__legend {
+  margin: 0.5rem 0 0;
+  font-size: 0.8rem;
+  color: #374151;
+}

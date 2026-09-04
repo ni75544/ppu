@@ -40,3 +40,113 @@ sites/simpletest
 
 # Ignore multi-site test environment.
 # simpletest
+/autoload.php
+/autoload_runtime.php
+
+# Generated Graphify knowledge-graph artifacts.
+graphify-out/
+graph.json
+
+# Local DBHub credentials for the read-only database account.
+/.claude/dbhub.toml
+
+# Local, machine-specific AI handoff cache.
+/SESSION_STATE.md
+
+# Generated browser-QA output only. The permanent QA tools under qa/browser/ and
+# qa/support/ are source and stay tracked — never widen these two patterns to the
+# whole qa/ tree.
+/qa/artifacts/
+/qa/tmp/
+
+# Claude Code writes these while merging local settings; they are not source.
+/.claude/settings.local.json.tmp.*
+/.claude/tmp/
+
+# Database exports and archive copies taken at the repository root. These carry
+# real accounts, customer submissions, sessions and log rows; they must never be
+# re-added. Anchored to the root on purpose — do not widen to *.sql or *.zip,
+# which would swallow legitimate fixtures inside core and contrib.
+/ppu.sql
+/ppu*.sql
+/ppu*.sql.zip
+/ppu*.tar.gz
+
+# settings.php backups. The live sites/*/settings*.php files are already covered
+# above, but a ".backup-" suffix does not end in .php, so it slipped past.
+/sites/default/settings.php.backup-*
+/web/sites/default/settings.php
+/web/sites/default/settings.php.backup-*
+
+# Two duplicate trees that project rules exclude from this repository: the
+# parallel web/ docroot and the root-level copy of the custom module. The active
+# module lives at modules/custom_webform_handlers/ and stays tracked — the
+# leading slash below anchors this rule to the repository root so it cannot
+# match that path.
+/web/
+/custom_webform_handlers/
+
+# Composer installs Drupal core and every contributed project into these two
+# trees (drupal/core -> /core, drupal/<project> -> /modules/contrib/<project>).
+# composer.json and composer.lock are the versioned declaration; the installed
+# source is generated and is reconstructed by `composer install`. Anchored and
+# narrow on purpose: /modules/contrib/ must not be widened to /modules/, which
+# would swallow the active custom module at modules/custom_webform_handlers/.
+/core/
+/modules/contrib/
+
+# Disposable screenshots Claude wrote beside the settings files. The permanent
+# browser-QA output already lives under the ignored qa/artifacts/; this pattern
+# only covers the stray .claude/tmp-*.png copies and is not a blanket *.png.
+/.claude/tmp-*.png
+
+# One-off scratch files left at the repository root by earlier sessions: a
+# mistyped redirect target, two saved diffs, a lifted Webform page fragment,
+# two architecture note dumps, a bootstrap script, and a module zip snapshot.
+# Each is named exactly — no *.diff, *.zip or *.txt wildcard.
+/utputFormat
+/changes.diff
+/final_changes.diff
+/page_1_updated.yml
+/ARCHITECT.txt
+/ARCHITECT.txt.txt
+/ppu-boot.ps1
+/modules/w9.custom_webform_handlers_step16_production_hardening.zip
+
+# drupal/core-composer-scaffold output. Every path below was proven byte-identical
+# to its source under core/assets/scaffold/files/ (the mapping lives in
+# core/composer.json extra.drupal-scaffold.file-mapping; this project resolves
+# [web-root] and [project-root] to the repository root). `composer install`
+# regenerates them, so they are build output rather than authored source.
+#
+# Each entry is an exact anchored path on purpose. There is deliberately no
+# root-file, sites/**, profiles/** or themes/** wildcard here: authored siblings
+# such as /LICENSE.txt, /.user.ini, /404.html, /502.html, /CLAUDE.md, /CONTEXT.md,
+# /composer.json, /composer.lock and /sites/sites.php must stay trackable, and
+# /README.md below is the Drupal scaffold README — it cannot reach qa/README.md
+# or docs/**, which are anchored away by the leading slash.
+#
+# The 23rd mapping entry, modules/README.txt, is already excluded by the nested
+# modules/.gitignore and is intentionally not repeated here.
+/.csslintrc
+/.editorconfig
+/.eslintignore
+/.eslintrc.json
+/.gitattributes
+/.ht.router.php
+/.htaccess
+/example.gitignore
+/index.php
+/robots.txt
+/update.php
+/web.config
+/INSTALL.txt
+/README.md
+/profiles/README.txt
+/themes/README.txt
+/sites/README.txt
+/sites/default/default.services.yml
+/sites/default/default.settings.php
+/sites/development.services.yml
+/sites/example.settings.local.php
+/sites/example.sites.php

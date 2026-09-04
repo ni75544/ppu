@@ -1,0 +1,37 @@
+# The launch queue for dispatch background work.
+#
+# This lives in config/optional rather than config/install so that the module
+# never has to declare a hard dependency on Advanced Queue: Drupal installs the
+# queue the moment advancedqueue is enabled, and leaves it out entirely when it
+# is not. The enforced dependency below keeps ownership with this module, so
+# uninstalling the module removes the queue instead of orphaning it.
+#
+# The backend is Advanced Queue's own durable SQL backend (plugin id
+# "database", table "advancedqueue"). Redis is provisioned for Drupal cache and
+# lock workloads only; Advanced Queue has no configuration-only Redis backend,
+# and a job whose lifecycle lived in a volatile store could be lost after an
+# authoritative state change had already committed. Nothing here decides price,
+# eligibility, payment success, or capacity - jobs only react after the
+# planner's own transaction has committed.
+#
+# locked: true forbids deleting the queue through the administrative UI, which
+# is correct for a queue defined in code.
+langcode: en
+status: true
+dependencies:
+  enforced:
+    module:
+      - custom_webform_handlers
+id: custom_webform_handlers_dispatch
+label: 'Dispatch jobs'
+backend: database
+backend_configuration:
+  lease_time: 300
+processor: cron
+processing_time: 90
+locked: true
+stop_when_empty: true
+threshold:
+  type: 0
+  limit: 0
+  state: all

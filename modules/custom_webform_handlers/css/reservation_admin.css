@@ -1,0 +1,153 @@
+/**
+ * @file
+ * Clear operational state for the reservation administration dashboard.
+ */
+
+.custom-reservation-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 1rem 0;
+}
+
+.custom-reservation-summary__item {
+  min-width: 8rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid #d1d5db;
+  border-radius: 0.25rem;
+  background: #f9fafb;
+}
+
+.custom-reservation-summary__count {
+  display: block;
+  font-size: 1.4rem;
+  font-weight: 700;
+}
+
+.custom-reservation-admin-status {
+  display: inline-block;
+  min-width: 6.5rem;
+  padding: 0.2rem 0.45rem;
+  border-radius: 0.2rem;
+  font-weight: 700;
+  text-align: center;
+}
+
+/**
+ * One colour per reservation state, so the daily grid can be read at a glance.
+ *
+ * The three states that actually stop a visitor booking — confirmed, blocked,
+ * and an unexpired hold — are warm and heavy. Expired and Released describe a
+ * time that is open again, so they stay quiet and must not read as taken.
+ */
+.custom-reservation-admin-status--booked,
+.custom-reservation-admin-status--confirmed {
+  color: #741b1b;
+  background: #fbeaea;
+  border: 1px solid #b42318;
+}
+
+.custom-reservation-admin-status--held {
+  color: #7a4100;
+  background: #fdf3e7;
+  border: 1px solid #b45309;
+}
+
+.custom-reservation-admin-status--blocked {
+  color: #3f2d63;
+  background: #efeafc;
+  border: 1px solid #6d4bc4;
+}
+
+.custom-reservation-admin-status--available {
+  color: #155724;
+  background: #e8f5e9;
+  border: 1px solid #2e7d32;
+}
+
+.custom-reservation-admin-status--expired,
+.custom-reservation-admin-status--released {
+  color: #4b5563;
+  background: #f1f3f5;
+  border: 1px solid #9aa1a9;
+}
+
+/* A faint tint on the whole row, so a full day is scannable without reading
+ * every chip. Kept lighter than the chip itself to stay legible under the
+ * administration theme's own row striping. */
+.custom-reservation-slot-row--confirmed,
+.custom-reservation-slot-row--booked {
+  background-color: #fdf6f6;
+}
+
+.custom-reservation-slot-row--held {
+  background-color: #fffbf5;
+}
+
+.custom-reservation-slot-row--blocked {
+  background-color: #f9f7fe;
+}
+
+.custom-reservation-slot-row--available {
+  background-color: #f6fbf7;
+}
+
+.custom-reservation-count {
+  margin: 0.5rem 0;
+  font-weight: 600;
+}
+
+/**
+ * Bounded schedule capacity summary.
+ *
+ * Status is carried in words and in six numeric columns; the row tint is only a
+ * scanning aid, so the table remains readable without colour.
+ */
+.custom-reservation-admin-status--partial {
+  color: #7a4100;
+  background: #fdf3e7;
+  border: 1px solid #b45309;
+}
+
+.custom-reservation-admin-status--full {
+  color: #741b1b;
+  background: #fbeaea;
+  border: 1px solid #b42318;
+}
+
+.custom-reservation-admin-status--open {
+  color: #155724;
+  background: #e8f5e9;
+  border: 1px solid #2e7d32;
+}
+
+.custom-reservation-admin-status--closed {
+  color: #4b5563;
+  background: #f1f3f5;
+  border: 1px solid #9aa1a9;
+}
+
+.custom-reservation-schedule-row--full {
+  background-color: #fdf6f6;
+}
+
+.custom-reservation-schedule-row--partial {
+  background-color: #fffbf5;
+}
+
+.custom-reservation-schedule-row--open {
+  background-color: #f6fbf7;
+}
+
+.custom-reservation-schedule-row--closed {
+  background-color: #f8f9fa;
+  color: #6b7280;
+}
+
+.custom-reservation-schedule-range {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 0.75rem;
+  margin: 0.5rem 0 1rem;
+}

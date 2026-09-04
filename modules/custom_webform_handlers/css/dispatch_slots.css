@@ -1,0 +1,146 @@
+/**
+ * @file
+ * Styling for the Dispatch Planner availability widget.
+ *
+ * Presentational only. Nothing here decides what is offerable or holdable — that
+ * is the server's job, and the widget's JavaScript never encodes it either. The
+ * rules below only lay out the date control, the arrival buttons the server
+ * returned, the authoritative quote, and the live status line, and make the
+ * selected and busy states legible to sight and to assistive technology.
+ *
+ * Colours are kept theme-neutral: the widget inherits the form's text colour and
+ * leans on the accent/highlight system colours so it reads correctly in a light
+ * or dark theme without hard-coding either.
+ */
+
+.custom-webform-dispatch {
+  margin: 1.5rem 0;
+  padding: 1rem 1.25rem 1.25rem;
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.015);
+}
+
+.custom-webform-dispatch.is-busy {
+  /* A quiet signal that a request is in flight; the status line carries the
+     accessible announcement, so this is decoration only. */
+  cursor: progress;
+}
+
+.custom-webform-dispatch__heading {
+  margin: 0 0 0.5rem;
+  font-size: 1.05rem;
+  line-height: 1.3;
+}
+
+.custom-webform-dispatch__timezone {
+  /* The one fixed statement of the display zone. There is deliberately no
+     timezone selector: the arrival is always in the service's zone, and this
+     label only removes any doubt about which zone the times are read in. */
+  margin: 0 0 0.75rem;
+  font-size: 0.8rem;
+  opacity: 0.75;
+}
+
+/* The widget renders no date control: the form's own Preferred Service Date is
+   the one public date field, and the rules that styled the duplicate went with
+   it. Nothing here hides a date control — there is none left to hide. */
+
+.custom-webform-dispatch__list {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(11rem, 1fr));
+  gap: 0.6rem;
+  margin: 0 0 1rem;
+  padding: 0;
+  list-style: none;
+}
+
+.custom-webform-dispatch__item {
+  margin: 0;
+  padding: 0;
+}
+
+.custom-webform-dispatch__slot {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  width: 100%;
+  padding: 0.6rem 0.75rem;
+  border: 1px solid rgba(0, 0, 0, 0.3);
+  border-radius: 5px;
+  background: Canvas;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.custom-webform-dispatch__slot:hover {
+  border-color: rgba(0, 0, 0, 0.55);
+}
+
+.custom-webform-dispatch__slot:focus-visible {
+  /* Always keep a visible keyboard focus ring; do not rely on colour alone. */
+  outline: 2px solid Highlight;
+  outline-offset: 2px;
+}
+
+.custom-webform-dispatch__slot--selected {
+  border-color: Highlight;
+  outline: 2px solid Highlight;
+  outline-offset: -1px;
+  background: color-mix(in srgb, Highlight 12%, Canvas);
+}
+
+.custom-webform-dispatch__slot-time {
+  font-size: 1.05rem;
+  font-weight: 700;
+}
+
+.custom-webform-dispatch__slot-promise {
+  font-size: 0.85rem;
+}
+
+.custom-webform-dispatch__slot-eta {
+  font-size: 0.8rem;
+  opacity: 0.8;
+}
+
+.custom-webform-dispatch__price {
+  margin: 0 0 0.35rem;
+  font-weight: 600;
+}
+
+.custom-webform-dispatch__distance {
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+  opacity: 0.85;
+}
+
+.custom-webform-dispatch__status {
+  margin: 0;
+  min-height: 1.4em;
+  font-size: 0.9rem;
+  opacity: 0.9;
+}
+
+@media (prefers-color-scheme: dark) {
+  .custom-webform-dispatch {
+    border-color: rgba(255, 255, 255, 0.18);
+    background: rgba(255, 255, 255, 0.03);
+  }
+
+  .custom-webform-dispatch__slot {
+    border-color: rgba(255, 255, 255, 0.35);
+  }
+
+  .custom-webform-dispatch__slot:hover {
+    border-color: rgba(255, 255, 255, 0.6);
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .custom-webform-dispatch__slot {
+    transition: border-color 0.12s ease, background-color 0.12s ease;
+  }
+}

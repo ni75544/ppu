@@ -1,0 +1,28 @@
+langcode: en
+status: true
+dependencies:
+  module:
+    - custom_webform_handlers
+    - eca
+id: custom_webform_handlers_popularity
+modeller: fallback
+label: 'Dispatch: recount popularity on review transition'
+version: 1.0.0
+weight: 0
+events:
+  event_review_transitioned:
+    plugin: 'custom_webform_handlers_dispatch_domain_event:review_transitioned'
+    label: 'Review Request transitioned'
+    configuration: {  }
+    successors:
+      -
+        id: action_enqueue_popularity_recount
+        condition: ''
+conditions: {  }
+gateways: {  }
+actions:
+  action_enqueue_popularity_recount:
+    plugin: custom_webform_handlers_enqueue_popularity_recount
+    label: 'Enqueue service popularity recount'
+    configuration: {  }
+    successors: {  }

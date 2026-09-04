@@ -1,0 +1,21 @@
+# The single line item on a dispatch order: one courier job, at one locked price.
+#
+# purchasableEntityType is empty on purpose, and it is the load-bearing choice
+# here. A dispatch job is not a catalogue product: its price comes from the
+# server's own quote for one address pair at one arrival, so there is no
+# purchasable entity to reference and no product to keep in sync.
+#
+# Commerce answers that shape natively. With no purchasable entity type,
+# OrderItem::bundleFieldDefinitions() hides purchased_entity and makes title
+# required, and OrderRefresh never recalculates the title or the unit price
+# because there is no purchased entity to recalculate them from. So the price
+# this module writes is the price that stays on the order, without a custom
+# field, a custom price resolver, or an order processor to defend it.
+langcode: en
+status: true
+label: 'Dispatch service'
+id: dispatch_service
+purchasableEntityType: ''
+orderType: dispatch
+traits: {  }
+locked: false

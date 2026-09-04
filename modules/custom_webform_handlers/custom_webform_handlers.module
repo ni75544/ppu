@@ -4,3 +4,122 @@
  * @file
  * Custom Webform Handlers module.
  */
+
+use Drupal\custom_webform_handlers\Dispatch\Notify\DispatchNotificationDispatcher;
+
+/**
+ * Implements hook_mail().
+ *
+ * Assembly only. The subject and body arrive already composed, from
+ * DispatchNotificationComposer, which is where the placeholder vocabulary and the
+ * privacy rules that govern it live; this hook decides nothing about content and adds
+ * nothing to it.
+ *
+ * Plain text, declared as such. There is no HTML alternative and no markup here, so
+ * there is no escaping decision to get wrong — a customer's own answer can never be
+ * rendered into a message as though it were part of the template, because the template
+ * is never treated as markup in the first place.
+ */
+function custom_webform_handlers_mail($key, &$message, $params) {
+  if ($key !== DispatchNotificationDispatcher::MAIL_KEY) {
+    return;
+  }
+
+  // Set rather than appended: this is the module's own key, and inventing a merge with
+  // whatever the mail system defaulted to would make the encoding depend on the site's
+  // other modules.
+  $message['headers']['Content-Type'] = 'text/plain; charset=utf-8';
+  $message['headers']['Content-Transfer-Encoding'] = '8Bit';
+
+  $message['subject'] = (string) ($params['subject'] ?? '');
+
+  // The body is an array of lines that the mail system joins. One element, because the
+  // composed body is already the whole message including its line breaks.
+  $message['body'][] = (string) ($params['body'] ?? '');
+}
+
+/**
+ * Implements hook_cron().
+ *
+ * The module's unattended hands, doing two unrelated jobs that share only the fact that
+ * no member of staff is present to do them. Each runs in its own try/catch with no path
+ * between them, because one is an authority the site depends on and the other is a
+ * convenience it does not, and a queue that is down for the second must never be able to
+ * stop the first.
+ *
+ * The first job is the Review Request expiry sweep, and it exists because a deadline has
+ * to be able to pass without anyone watching it. Every other transition on a request is
+ * somebody's decision and belongs to the form that records who made it. Expiry is the
+ * exception — nobody expires a quote, a date does — which is why
+ * ReviewManagerInterface::expireLapsed() takes no identifier and cannot be aimed at a
+ * particular customer's job from here. It is bounded at the manager's own default: a
+ * site offline long enough to accumulate more lapsed offers than one run will sweep
+ * clears the rest on the following run, a slower cleanup than a single unbounded UPDATE
+ * and a far smaller thing to go wrong, because cron holds no lock over the whole table
+ * and a customer whose approved offer is being paid for right now is racing a
+ * compare-and-set inside the manager rather than a sweep that already claimed every row
+ * it read. The state machine, not this hook, decides what may lapse —
+ * ReviewState::mayExpire() is FALSE for a scheduled booking, so a job somebody has
+ * already paid for cannot be expired out from under them no matter how long ago its
+ * offer deadline was set.
+ *
+ * The second job only asks for a recount of the Service Type popularity snapshot; it
+ * never computes one. That snapshot is a read-cache that orders the service list, not an
+ * authority — the ranking has a deterministic fallback and Express Courier is pinned
+ * first regardless — so the work is a non-authoritative Advanced Queue job that runs on
+ * its own SQL-backed worker, and cron's whole part in it is to enqueue, never to hold a
+ * maintenance run open behind a recount. It is throttled to roughly nightly by a single
+ * state timestamp so an hourly cron does not enqueue an hourly recount, and it is the
+ * dependable driver rather than the only one: an ECA reaction enqueues the same job
+ * opportunistically when a Review Request transitions, and this hook is what guarantees
+ * the snapshot is still refreshed on a quiet day when nothing transitioned. The job
+ * forbids duplicates and the recount is idempotent, so the two drivers overlapping costs
+ * nothing.
+ *
+ * Both failures are caught and named by class rather than by message, the same
+ * discipline the rest of the module follows for storage and provider errors, because an
+ * exception message can quote the values it choked on and cron writes to a log that
+ * operators read. Cron continues either way: the other modules on the site have their
+ * own maintenance to do and none of it depends on either of these.
+ */
+function custom_webform_handlers_cron(): void {
+  try {
+    \Drupal::service('custom_webform_handlers.review_manager')->expireLapsed();
+  }
+  catch (\Throwable $exception) {
+    // Logged, not rethrown. The count of what did lapse is the manager's own to
+    // report; what is recorded here is only that the sweep stopped early, so a run
+    // that quietly did nothing cannot be mistaken for a run that found nothing.
+    \Drupal::logger('custom_webform_handlers')->error('The Review Request expiry sweep failed: @class.', [
+      '@class' => get_class($exception),
+    ]);
+  }
+
+  try {
+    // Roughly nightly, not every run. Cron may fire many times a day; a read-cache does
+    // not earn a recount that often, so a single state timestamp gates it to once per
+    // window. The window is stamped before the enqueue, not after, so a process that
+    // dies between the two cannot turn one missed recount into a recount every minute —
+    // the snapshot simply waits for the next window, which for a non-authoritative cache
+    // is the safe direction to fail. The enqueue itself swallows its own errors, so the
+    // catch below is for the unlikely failure of reaching the queue service at all.
+    $state = \Drupal::state();
+    $now = \Drupal::time()->getRequestTime();
+    $last = (int) $state->get('custom_webform_handlers.popularity_recount.last_enqueued', 0);
+    // Twenty hours: comfortably inside a day, so a nightly cron never drifts far enough
+    // to skip a night, and comfortably outside an hour, so an hourly cron never enqueues
+    // hourly.
+    if ($now - $last >= 72000) {
+      $state->set('custom_webform_handlers.popularity_recount.last_enqueued', $now);
+      \Drupal::service('custom_webform_handlers.maintenance_queue')->enqueuePopularityRecount();
+    }
+  }
+  catch (\Throwable $exception) {
+    // Independent of the sweep above and logged the same way. A recount that could not
+    // be enqueued leaves the previous snapshot in place, and the ranking's deterministic
+    // fallback behind that; nothing a customer sees depends on this having run.
+    \Drupal::logger('custom_webform_handlers')->error('The Service Type popularity recount could not be enqueued: @class.', [
+      '@class' => get_class($exception),
+    ]);
+  }
+}

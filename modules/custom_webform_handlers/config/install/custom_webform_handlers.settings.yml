@@ -1,6 +1,25 @@
 google_maps_browser_api_key: ''
 route_request_timeout: 8
 route_cache_ttl: 3600
+# Scheduled, traffic-aware routes go stale faster than time-independent ones,
+# because a live-traffic blend for a departure an hour from now stops describing
+# that departure quite quickly. Kept well under route_cache_ttl for that reason.
+route_scheduled_cache_ttl: 900
+# BEST_GUESS, PESSIMISTIC, or OPTIMISTIC. Chosen explicitly rather than left to
+# Google's default: which assumption the schedule is built on is an operational
+# decision. Raise to PESSIMISTIC where late arrivals cost more than idle time.
+route_traffic_model: BEST_GUESS
+# Departure instants are floored to this many seconds before being sent, so that
+# measuring a working day costs a handful of billed requests rather than one per
+# candidate arrival. Matches the default 30-minute booking grid.
+route_departure_bucket_seconds: 1800
+# How far ahead of now a departure must sit. Google rejects a past departure for
+# driving, and a planner legitimately asks about a working day already under way.
+route_departure_min_lead_seconds: 60
+# The margin added to a duration that carries no traffic data, as a percentage.
+# Not a traffic model — the amount by which a free-flow drive is assumed to be an
+# under-statement. A floor of 10 applies whatever is configured here.
+route_traffic_fallback_inflation_percent: 25
 preview_rate_limit: 30
 quote:
   currency: USD
@@ -57,6 +76,32 @@ quote:
     expedited_cents: 15000
     included_miles: 10
     excess_distance_cents_per_mile: 100
+  # Express Courier. The pinned, self-bookable local service: one driver, one
+  # pickup, one delivery, priced from distance rather than from crew size.
+  #
+  # Every figure is integer cents, and the rate_version above is stamped into each
+  # quote so a stored total can always be read back against the rates that produced
+  # it. Changing any number here means changing rate_version too.
+  courier:
+    base_cents: 1900
+    # Miles the base charge already covers. Beyond this, per-mile pricing starts.
+    included_miles: 5
+    excess_distance_cents_per_mile: 150
+    # Keyed by Delivery Mode machine value. Store Pickup costs more because the
+    # driver queues at a counter and identifies an order rather than taking a
+    # package from someone's hands.
+    mode_surcharge_cents:
+      courier_send: 0
+      courier_receive: 0
+      courier_store_pickup: 500
+    # Optional, and keyed by the urgency machine value the form submits. An
+    # unmapped urgency adds nothing rather than being refused: urgency is an
+    # upsell, not a fact the quote depends on. A tier not listed here is simply
+    # not surcharged.
+    urgency_surcharge_cents:
+      standard: 0
+      rush: 750
+      expedited: 1500
   diy_truck:
     daily_base_cents:
       10_ft: 9900

@@ -4,9 +4,19 @@ namespace Drupal\custom_webform_handlers\Quote;
 
 use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\custom_webform_handlers\Distance\DistanceResult;
+use Drupal\custom_webform_handlers\Dispatch\Profile\BookingProfileResolverInterface;
 
 /**
  * Calculates preliminary quotes from normalized server-side data.
+ *
+ * Which price book applies is no longer this class's decision. It used to switch
+ * on the raw service_type the submission carried, which made the price book an
+ * implicit third list of service names alongside self_bookable.service_types and
+ * manual_review.service_types — three places to edit to open a service, and three
+ * places to disagree. It now asks the service's BookingProfile for its quote
+ * strategy and switches on that. For every service that does not name one, the
+ * strategy *is* the service type, so each case label below is unchanged and so is
+ * every figure it charges.
  */
 final class QuoteCalculator {
 
@@ -15,6 +25,7 @@ final class QuoteCalculator {
 
   public function __construct(
     private readonly ConfigFactoryInterface $configFactory,
+    private readonly BookingProfileResolverInterface $bookingProfiles,
   ) {}
 
   public function calculate(array $data, DistanceResult $distance): QuoteResult {
@@ -23,12 +34,16 @@ final class QuoteCalculator {
 
     $config = $this->configFactory->get('custom_webform_handlers.settings');
     $service = (string) ($data['service_type'] ?? '');
+    // The price book to apply. An unknown service resolves to a profile whose
+    // strategy is the empty string, which reaches default: below and is refused
+    // there — the same answer the raw service type produced.
+    $strategy = $this->bookingProfiles->resolve(trim($service))->quoteStrategy;
     $total_cents = 0;
     $weight_lbs = NULL;
     $weight_source = 'not_applicable';
     $commercial_packing_included = FALSE;
 
-    switch ($service) {
+    switch ($strategy) {
       case 'long_distance_move':
         [$weight_lbs, $weight_source] = $this->resolveWeight(
           $data,
@@ -209,6 +224,102 @@ final class QuoteCalculator {
         }
         break;
 
+      case 'courier':
+        // Express Courier. Priced from distance and Delivery Mode rather than from
+        // crew size, because it is always one driver: base charge, included miles,
+        // then per-mile beyond them.
+        //
+        // The weight limit is deliberately not applied here. Whether a request may
+        // be self-booked is the eligibility policy's decision, read from
+        // self_bookable.max_package_lbs, and a second threshold in the calculator
+        // would be a second authority for one invariant. This case records the
+        // declared weight and prices the work; it does not gatekeep it.
+        $declared_weight = $this->numeric($data['total_weight_lbs'] ?? NULL);
+        $weight_unit = (string) ($data['total_weight_unit'] ?? 'lb');
+        if ($declared_weight !== NULL && $declared_weight > 0) {
+          $weight_lbs = $weight_unit === 'kg' ? $declared_weight * 2.2046226218 : $declared_weight;
+          $weight_source = $weight_unit === 'kg' ? 'customer_entered_kg' : 'customer_entered_lb';
+        }
+        else {
+          $weight_lbs = 0.0;
+          $weight_source = 'missing';
+          $this->manualReviewReasons[] = 'missing_package_weight';
+        }
+
+        $base_cents = $this->positiveInt($config->get('quote.courier.base_cents'), 1900);
+        $this->addLine('courier_base', 'Express Courier base charge', $base_cents);
+        $total_cents += $base_cents;
+
+        $included = $this->positiveFloat($config->get('quote.courier.included_miles'), 5);
+        if ($distance->distanceMiles() > $included) {
+          $rate = $this->positiveInt($config->get('quote.courier.excess_distance_cents_per_mile'), 150);
+          $amount = (int) round(($distance->distanceMiles() - $included) * $rate);
+          $this->addLine('courier_distance', 'Express Courier excess-distance charge', $amount, [
+            'distance_miles' => round($distance->distanceMiles(), 2),
+            'included_miles' => $included,
+            'cents_per_mile' => $rate,
+          ]);
+          $total_cents += $amount;
+        }
+
+        // Delivery Mode. An unrecognised or absent mode is not surcharged at zero,
+        // because the mode decides which end of the job is a counter and which is a
+        // doorstep. Without it there is no priced job, only a guess.
+        $mode = (string) ($data['delivery_mode'] ?? '');
+        $modes = [
+          'courier_send' => 'Send',
+          'courier_receive' => 'Receive',
+          'courier_store_pickup' => 'Store Pickup',
+        ];
+        if (isset($modes[$mode])) {
+          $amount = $this->positiveInt($config->get('quote.courier.mode_surcharge_cents.' . $mode), 0);
+          $this->addLine('courier_mode', $modes[$mode] . ' handling surcharge', $amount);
+          $total_cents += $amount;
+        }
+        else {
+          $this->manualReviewReasons[] = 'missing_delivery_mode';
+        }
+
+        // Urgency is an upsell rather than a fact the price depends on, so a tier
+        // nobody has priced simply adds nothing instead of forcing review.
+        $urgency = (string) ($data['courier_urgency'] ?? 'standard');
+        if ($urgency !== '' && $urgency !== 'standard') {
+          $amount = $this->positiveInt($config->get('quote.courier.urgency_surcharge_cents.' . $urgency), 0);
+          $this->addLine('courier_urgency', ucfirst(str_replace('_', ' ', $urgency)) . ' service', $amount);
+          $total_cents += $amount;
+        }
+
+        // Contents. Only a clear acknowledgment prices; "restricted" or "not sure"
+        // means staff read the request before a figure is shown. The booking-side
+        // rule lives in the dispatch profile's handling_flags — this is the narrower
+        // statement that an estimate is not offered for a package whose contents are
+        // unknown.
+        //
+        // Two controls can carry the acknowledgment. Historic submissions and the
+        // canonical value preSave writes use prohibited_items_ack='none'. The
+        // simplified Courier UI renders a single compact checkbox,
+        // courier_prohibited_ack, which submits a truthy value only when the
+        // customer has affirmed the package carries nothing prohibited. Either
+        // satisfies the check; anything else — including an absent or crafted value
+        // — still requires review, so a hidden or emptied radio can never silently
+        // pass as 'none'.
+        //
+        // Both are read shape-tolerantly but not shape-credulously. The legacy
+        // radio is compared only when it arrives as a scalar, so an array-shaped
+        // ['none'] is not honoured as 'none' — it simply is not the string. The
+        // compact checkbox goes through attestationChecked(), which unwraps a
+        // one-element array. Previously either shape was cast to the literal
+        // string 'Array' with a PHP warning.
+        $prohibited_ack = is_scalar($data['prohibited_items_ack'] ?? NULL)
+          ? (string) $data['prohibited_items_ack']
+          : '';
+        $contents_acknowledged = $prohibited_ack === 'none'
+          || $this->attestationChecked($data['courier_prohibited_ack'] ?? NULL);
+        if (!$contents_acknowledged) {
+          $this->manualReviewReasons[] = 'package_contents_require_review';
+        }
+        break;
+
       case 'diy_truck_rental':
         $this->manualReviewReasons[] = 'diy_fuel_taxes_require_review';
         $truck_size = (string) ($data['truck_size'] ?? '');
@@ -273,18 +384,40 @@ final class QuoteCalculator {
         $this->manualReviewReasons[] = 'missing_or_unsupported_service_type';
     }
 
-    if (!empty($data['packing_services']) && !$commercial_packing_included) {
-      $amount = $this->positiveInt($config->get('quote.fees.packing_cents'), 32500);
-      $this->addLine('packing', 'Professional packing', $amount);
-      $total_cents += $amount;
+    // The three universal add-on questions are move products, and every service
+    // that offers them is priced for them here rather than inside the switch.
+    // Express Courier is the exception, because it cannot schedule them:
+    // ConfigDispatchEligibility refuses Slots for any add-on missing from
+    // durations.courier.add_on_minutes, so charging a courier request for packing
+    // would publish an estimate the planner has already declined to serve - the
+    // quote/Slot contradiction this module has had to fix once already. The
+    // simplified Courier UI no longer renders these questions and preSave clears
+    // them, so a value that still arrives on a courier request is stale wizard
+    // state or a crafted payload. Either goes to staff, which is what eligibility
+    // independently decides about the same request, instead of quietly adding a
+    // move charge to a parcel run.
+    if ($strategy === 'courier') {
+      foreach (['packing_services', 'cleaning_services', 'disposal_donation_interest'] as $move_add_on) {
+        if (!empty($data[$move_add_on])) {
+          $this->manualReviewReasons[] = 'courier_add_ons_require_review';
+          break;
+        }
+      }
     }
-    if (!empty($data['cleaning_services'])) {
-      $amount = $this->positiveInt($config->get('quote.fees.cleaning_cents'), 21000);
-      $this->addLine('cleaning', 'Move-in/move-out cleaning', $amount);
-      $total_cents += $amount;
-    }
-    if (!empty($data['disposal_donation_interest'])) {
-      $this->manualReviewReasons[] = 'disposal_or_donation_requires_review';
+    else {
+      if (!empty($data['packing_services']) && !$commercial_packing_included) {
+        $amount = $this->positiveInt($config->get('quote.fees.packing_cents'), 32500);
+        $this->addLine('packing', 'Professional packing', $amount);
+        $total_cents += $amount;
+      }
+      if (!empty($data['cleaning_services'])) {
+        $amount = $this->positiveInt($config->get('quote.fees.cleaning_cents'), 21000);
+        $this->addLine('cleaning', 'Move-in/move-out cleaning', $amount);
+        $total_cents += $amount;
+      }
+      if (!empty($data['disposal_donation_interest'])) {
+        $this->manualReviewReasons[] = 'disposal_or_donation_requires_review';
+      }
     }
 
     $status = $this->manualReviewReasons ? 'manual_review' : 'estimated';
@@ -391,6 +524,32 @@ final class QuoteCalculator {
       return [];
     }
     return array_values(array_filter($value, static fn ($item) => is_string($item) && $item !== '' && $item !== '0'));
+  }
+
+  /**
+   * Whether a checkbox-style attestation value is affirmatively checked.
+   *
+   * A one-element array is unwrapped before the string cast, because a REST, ECA,
+   * or queue writer can deliver a checked box as ['1']; the cast used to turn
+   * that into the literal string 'Array' and read the affirmation as unchecked.
+   * Anything that is not a single scalar after unwrapping stays unchecked.
+   *
+   * This is deliberately a copy of AddressDistanceHandler::attestationChecked().
+   * The handler canonicalises the stored value and this class prices it, and the
+   * two must agree on the accept set — '1', 'true', 'yes', 'on', TRUE, or any of
+   * those wrapped in a one-element array — so change both or neither.
+   */
+  private function attestationChecked(mixed $value): bool {
+    if (is_array($value)) {
+      $value = count($value) === 1 ? reset($value) : NULL;
+    }
+    if (is_bool($value)) {
+      return $value;
+    }
+    if (!is_scalar($value)) {
+      return FALSE;
+    }
+    return in_array(strtolower(trim((string) $value)), ['1', 'true', 'yes', 'on'], TRUE);
   }
 
   private function addLine(string $code, string $label, int $amount_cents, array $metadata = []): void {

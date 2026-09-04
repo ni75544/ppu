@@ -44,7 +44,7 @@ $required_when_value = static function (string $field, string $value): array {
 $changes = [
   'phone_number' => static function (array &$element): void {
     $element['#description'] = 'Enter a 10-digit US phone number. Spaces, parentheses, periods, and hyphens are allowed.';
-    $element['#pattern'] = '(?:\\+?1[ .-]?)?(?:\\([0-9]{3}\\)|[0-9]{3})[ .-]?[0-9]{3}[ .-]?[0-9]{4}';
+    $element['#pattern'] = '(?:\\+?1[ .\\-]?)?(?:\\([0-9]{3}\\)|[0-9]{3})[ .\\-]?[0-9]{3}[ .\\-]?[0-9]{4}';
     $element['#pattern_error'] = 'Enter a valid 10-digit US phone number.';
     $element['#required'] = TRUE;
   },

@@ -1,0 +1,26 @@
+# The order field the contact's phone number is written to.
+#
+# The number a driver calls on the day of pickup. Stored as a plain string, not a
+# telephone field type, so no contrib dependency is added for a value the dispatch
+# checkout pane already collects and trims. Length 64 is generous for an
+# international number with separators and an extension.
+langcode: en
+status: true
+dependencies:
+  module:
+    - commerce_order
+id: commerce_order.field_dispatch_contact_phone
+field_name: field_dispatch_contact_phone
+entity_type: commerce_order
+type: string
+settings:
+  max_length: 64
+  case_sensitive: false
+  is_ascii: false
+module: core
+locked: false
+cardinality: 1
+translatable: true
+indexes: {  }
+persist_with_no_fields: false
+custom_storage: false

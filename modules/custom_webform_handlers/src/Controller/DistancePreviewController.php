@@ -7,6 +7,7 @@ use Drupal\Core\DependencyInjection\ContainerInjectionInterface;
 use Drupal\Core\Flood\FloodInterface;
 use Drupal\custom_webform_handlers\Distance\DistanceProviderException;
 use Drupal\custom_webform_handlers\Distance\DistanceProviderInterface;
+use Drupal\custom_webform_handlers\Plugin\WebformHandler\AddressDistanceHandler;
 use Drupal\custom_webform_handlers\Quote\QuoteCalculator;
 use Psr\Log\LoggerInterface;
 use Symfony\Component\DependencyInjection\ContainerInterface;
@@ -87,47 +88,30 @@ final class DistancePreviewController implements ContainerInjectionInterface {
     return $response;
   }
 
+  /**
+   * Reduces a browser-supplied quote payload to the pricing allowlist.
+   *
+   * The allowlist is AddressDistanceHandler::QUOTE_INPUT_FIELDS and never a copy
+   * of it. A second list here silently starved QuoteCalculator's Express Courier
+   * branch of delivery_mode, total_weight_lbs, total_weight_unit, courier_urgency
+   * and prohibited_items_ack, so every courier preview came back
+   * "manual_review" — missing_package_weight, missing_delivery_mode and
+   * package_contents_require_review — while the Dispatch offer endpoint, which
+   * receives the full value set, correctly reported the same request as
+   * self-bookable and served Slots. One quote status cannot have two input
+   * contracts.
+   *
+   * The caps stay here, because they are this endpoint's concern rather than the
+   * calculator's: the offer path is fed by validated Webform values, whereas this
+   * one is fed by an unauthenticated POST body.
+   */
   private function sanitizeQuoteInput(mixed $input): array {
     if (!is_array($input)) {
       return [];
     }
-    $allowed = [
-      'service_type',
-      'shipment_weight',
-      'shipment_weight_unit',
-      'shipment_size',
-      'shipment_home_size',
-      'item_quantity',
-      'item_length',
-      'item_width',
-      'item_height',
-      'dimension_unit',
-      'move_size_residential',
-      'origin_access_conditions',
-      'origin_stairs_flights',
-      'destination_access_conditions',
-      'destination_stairs_flights',
-      'parking_situation',
-      'specialty_items_residential',
-      'additional_services_commercial',
-      'building_requirements',
-      'timing_of_move',
-      'scope_of_move',
-      'specialty_items_long_distance',
-      'item_to_be_moved',
-      'truck_size',
-      'rental_duration',
-      'estimated_mileage',
-      'diy_addons',
-      'vehicle_helper_needs',
-      'service_speed',
-      'packing_services',
-      'cleaning_services',
-      'disposal_donation_interest',
-    ];
 
     $clean = [];
-    foreach ($allowed as $key) {
+    foreach (AddressDistanceHandler::QUOTE_INPUT_FIELDS as $key) {
       if (!array_key_exists($key, $input)) {
         continue;
       }

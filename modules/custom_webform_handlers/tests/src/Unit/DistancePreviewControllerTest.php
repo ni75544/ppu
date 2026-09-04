@@ -5,6 +5,7 @@ namespace Drupal\Tests\custom_webform_handlers\Unit;
 use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Flood\FloodInterface;
 use Drupal\custom_webform_handlers\Controller\DistancePreviewController;
+use Drupal\custom_webform_handlers\Dispatch\Profile\BookingProfileResolverInterface;
 use Drupal\custom_webform_handlers\Distance\DistanceProviderInterface;
 use Drupal\custom_webform_handlers\Quote\QuoteCalculator;
 use Drupal\Tests\UnitTestCase;
@@ -25,7 +26,10 @@ final class DistancePreviewControllerTest extends UnitTestCase {
       $this->createMock(FloodInterface::class),
       $config_factory,
       $this->createMock(LoggerInterface::class),
-      new QuoteCalculator($config_factory),
+      new QuoteCalculator(
+        $config_factory,
+        $this->createMock(BookingProfileResolverInterface::class),
+      ),
     );
     $request = Request::create(
       '/custom-webform-handlers/distance-preview',

@@ -1,0 +1,40 @@
+# The customer service desk: who the customer is and what they paid, and no way to
+# move their booking.
+#
+# Specification item 7's third role. It is the mirror image of the Schedule Manager,
+# and the two together are what makes item 8's split load-bearing rather than
+# decorative: each holds exactly what the other is denied, and neither is a superset
+# of the other.
+#
+# It reads the board so a caller's job can be found at all, then the two disclosures
+# that answer a caller's actual questions — "is my payment through?" and "have you got
+# my number right?" A desk that cannot answer those has to ask a scheduler, and a
+# scheduler who can answer them is holding a customer list they have no use for.
+#
+# What is absent is the mutation. No 'manage dispatch schedule', so this role cannot
+# release capacity, replan a Reservation, withhold time, or book a held request — the
+# person on the telephone cannot move a van, and a caller who wants their booking
+# changed reaches somebody whose job that is. No 'review dispatch quotes' either: this
+# role reads what a job was quoted, and does not decide it.
+#
+# No 'view dispatch exact addresses'. Reading a payment state does not require the
+# route, and a desk that never plans a journey has no reason to hold one. Contact
+# detail is granted here and the address pair is not, which is precisely the
+# distinction the permission file draws: a telephone number identifies somebody, a
+# pickup and delivery pair repeated across a day is the route.
+langcode: en
+status: true
+dependencies:
+  module:
+    - custom_webform_handlers
+id: dispatch_financial_viewer
+label: 'Financial / Customer Info Viewer'
+weight: 7
+is_admin: false
+permissions:
+  # Find the job the caller is asking about.
+  - 'view dispatch board'
+  # Their name, email address, and telephone number.
+  - 'view dispatch customer contact'
+  # Order state, payment state, amount taken, approved quote.
+  - 'view dispatch financial details'

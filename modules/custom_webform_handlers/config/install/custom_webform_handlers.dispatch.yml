@@ -1,0 +1,434 @@
+# Dispatch Planner operating profile.
+#
+# This is the only place the operating profile is defined. No hour, buffer,
+# duration, depot, or limit below is repeated in PHP, so an operator can change
+# how the business runs without a code change.
+#
+# Service machine values are the ones the Webform already persists. They must not
+# be renamed: existing submissions are stored under them.
+
+# Which element answers each fact the planner reasons about.
+#
+# Keys are facts; values are Webform element keys. A fact left empty is unknown,
+# which the eligibility rules route to Manual Review — never to a permissive
+# default. Empty is therefore the correct value for a fact the Webform does not
+# ask yet, and the cost of leaving it empty is a staff review, not a mis-planned
+# job.
+#
+# Addresses are absent on purpose. Origin and destination are named per Webform by
+# the handler that owns the form, because two forms can ask for them under
+# different element keys while sharing this one operating profile.
+request_fields:
+  # The one public date field. Every service on the form asks for a Preferred
+  # Service Date, so the Dispatch widget has no date control of its own: it reads
+  # this element, and the offer endpoint re-reads it server-side. Naming it here is
+  # what makes it authoritative — an unmapped date would leave the planning day to
+  # whatever the browser posted, which is the one fact a customer must not be able
+  # to choose independently of what their submission will say.
+  requested_date: preferred_service_date
+  service_type: service_type
+  # The Courier Delivery Mode radios. The element keys and their values —
+  # courier_send, courier_receive, courier_store_pickup — are fixed by the Courier
+  # dispatch setup guide in the README and match self_bookable.delivery_modes
+  # below exactly. An absent or unrecognised mode is unknown, so the request still
+  # goes to staff rather than being planned on a guess.
+  delivery_mode: delivery_mode
+  # The Courier package weight. `total_weight_lbs` is the number the customer
+  # enters; `total_weight_unit` is a fixed hidden element valued `lb`, present so
+  # the server reads the unit rather than assuming one. The 30 lb self-service
+  # limit is only ever enforced against a declared unit — without the unit element
+  # the weight is unknown and the request goes to staff.
+  declared_weight: total_weight_lbs
+  declared_weight_unit: total_weight_unit
+  # The one-driver fact is deliberately UNMAPPED, and it is not a customer
+  # question any more.
+  #
+  # Express Courier is defined as a one-driver, self-service courier — one driver,
+  # one vehicle, and a weight ceiling that exists so one person can carry the
+  # package unaided. Asking the customer to confirm that turned a property of the
+  # service into a question they could get "wrong": a stale wizard value, a resumed
+  # draft, or a crafted payload of `0` refused an entirely valid in-limit request,
+  # with no way for them to see why.
+  #
+  # So the fact comes from self_bookable.single_driver_service_types below instead,
+  # resolved in DispatchRequestFactory before any element is read. Leaving this key
+  # empty is what stops the browser being asked for it at all: request_fields is
+  # also the source of the widget's value_fields allowlist, so an empty key removes
+  # the element from what JavaScript collects and sends. A service type the policy
+  # does not name still reads nothing here, which is unknown, which is Manual
+  # Review — the fail-safe is unchanged.
+  single_driver_handling: ''
+  vehicle_helper_needs: vehicle_helper_needs
+  # The prohibited-contents affirmation, in the two shapes that can carry it.
+  #
+  # courier_prohibited_ack is the compact checkbox the simplified Courier journey
+  # renders: it is read for truthiness, so an unchecked or absent box is not an
+  # affirmation. prohibited_items_ack is the older radio, still rendered for the
+  # move services and still present on every historic submission; only its `none`
+  # option affirms.
+  #
+  # require_contents_attestation is on, so silence keeps the request with staff.
+  # This is a required affirmation rather than a handling_flags entry because the
+  # failure to guard against is an unanswered question, and an unchecked box
+  # submits no marker for a flag rule to match.
+  contents_attestation: courier_prohibited_ack
+  contents_attestation_legacy: prohibited_items_ack
+  # Every element whose selections are add-ons. Read verbatim and compared against
+  # durations.move.add_on_minutes, which is still empty — so a selected add-on is
+  # an unknown duration and the request goes to staff rather than being timed as
+  # free.
+  add_ons:
+    - packing_services
+    - cleaning_services
+    - disposal_donation_interest
+  # Normalised handling markers, read verbatim from these elements and matched
+  # against manual_review.handling_flags below.
+  #
+  # prohibited_items_ack's option values ARE markers here: `none` passes because it
+  # is absent from the manual-review list, while `restricted` and `unsure` appear
+  # there and force staff review. That still screens the move services, where the
+  # radio is rendered, and it still screens a saved submission on the confirmation
+  # path, where the handler has written the canonical value.
+  #
+  # It is no longer the whole screen. The simplified Courier journey does not render
+  # this radio, so on the offer path it contributes nothing at all, and a marker rule
+  # cannot refuse an answer that was never given. contents_attestation above carries
+  # that case as a required affirmation. Both are kept: a flag catches a stated bad
+  # answer, an affirmation catches silence.
+  handling_flags:
+    - prohibited_items_ack
+  move_size: move_size_residential
+  origin_stairs_flights: origin_stairs_flights
+  destination_stairs_flights: destination_stairs_flights
+  origin_access: origin_access_conditions
+  destination_access: destination_access_conditions
+  parking_situation: parking_situation
+  # A count, not a yes/no. specialty_items_residential answers whether there are
+  # any, which cannot be timed per item, so it is deliberately not mapped here.
+  specialty_item_count: ''
+  # Store Pickup's paid-and-ready confirmation: the order_is_paid_and_ready
+  # element in the Store Pickup facts. store_pickup_requires_paid_and_ready is on,
+  # so a Store Pickup request stays with staff until this is confirmed.
+  store_pickup_paid_and_ready: order_is_paid_and_ready
+
+resource:
+  # The first production Resource. Capacity one per Resource and Slot.
+  id: driver-01-vehicle-01
+  capacity: 1
+  timezone: America/New_York
+  depot_address: ''
+  # Pickup arrival is offered on this cadence and no other.
+  grid_minutes: 30
+  # ISO-8601 weekday number => local HH:MM bounds. A weekday that is absent is
+  # not worked, which is how a closed day is expressed.
+  working_hours:
+    '1':
+      start: '08:00'
+      end: '18:00'
+    '2':
+      start: '08:00'
+      end: '18:00'
+    '3':
+      start: '08:00'
+      end: '18:00'
+    '4':
+      start: '08:00'
+      end: '18:00'
+    '5':
+      start: '08:00'
+      end: '18:00'
+    '6':
+      start: '09:00'
+      end: '15:00'
+  # Local intervals inside working hours that no Dispatch Window may overlap.
+  breaks:
+    - start: '12:00'
+      end: '12:30'
+  # Local Y-m-d dates on which this Resource offers nothing.
+  blackout_dates: {  }
+  # Padding added to Repositioning between consecutive Reservations.
+  repositioning_buffer_minutes: 20
+  # Padding at the end of every Dispatch Window before the Resource is free.
+  operational_buffer_minutes: 15
+  # How far ahead of today Slots may be offered.
+  booking_horizon_days: 30
+  # Whether the Resource must be able to reach the depot within working hours.
+  return_to_base: true
+
+# What each service decides about being booked, resolved through
+# BookingProfileResolverInterface. Every service the Webform offers now appears
+# here, because every service now renders the same public scheduling shell and the
+# shell needs to know, per service, whether a date can be self-booked or is owed a
+# review sentence. Nothing else is restated: what an entry omits is still derived
+# from the lists below.
+#
+# Each Manual Review entry states only that it is under review and what to say
+# about it. None states a duration, an access, parking or add-on mapping, a driver
+# count, a capacity claim or a price rule, and that absence is load-bearing — it is
+# what keeps a Manual Review service from becoming self-bookable.
+booking_profiles:
+  # The one element that carries a chosen arrival instant. Shell-level, because
+  # every Manual Review service renders the same widget as Courier and two services
+  # writing different elements is how a stale selection survives a service change.
+  selected_slot_field: dispatch_slot
+  # Which policy assesses a self-bookable service.
+  eligibility_policy: custom_webform_handlers.dispatch_eligibility
+  services:
+    # Express Courier: the reference. Its duration resolver is stated rather than
+    # inferred from `count(self_bookable.service_types) === 1`, which was correct
+    # only while exactly one service was open.
+    #
+    # `quote_strategy` is the price book QuoteCalculator applies. The strategy
+    # names are the existing price-book keys, so stating one here changes no
+    # figure: a service that names none is priced under its own service type, and
+    # every Manual Review entry below names exactly that.
+    courier:
+      mode: self_bookable
+      duration_resolver: courier
+      quote_strategy: courier
+      claims_capacity: true
+      # Express Courier is *defined* as a one-driver job, so this is a property of
+      # the service and never a question put to the browser.
+      single_driver_service: true
+      review_policy: offer_assessed
+      review_message: ''
+    # On-Demand Delivery: the Manual Review pilot, and the shape the five below
+    # copy. Same public scheduling shell, zero Slots, and a sentence that is true
+    # before anything is assessed — `always_review` is what lets the widget say so
+    # without posting an offer request whose only possible answer it already knows.
+    on_demand_delivery:
+      mode: manual_review
+      duration_resolver: ''
+      quote_strategy: on_demand_delivery
+      claims_capacity: false
+      single_driver_service: false
+      review_policy: always_review
+      review_message: 'This delivery needs a quick review before pickup times can be confirmed.'
+    # The five services that were already Manual Review by list membership and are
+    # now Manual Review by declaration as well. Every fact except the last two is
+    # the value the resolver already derived, restated so the profile reads as one
+    # statement rather than half a statement and half an inference. The last two are
+    # the only new information: review this always, and say this while doing it.
+    #
+    # Each sentence promises a review and nothing else. None names a time, a price,
+    # a duration or a confirmation the operator has not made, because the visitor is
+    # choosing a date in a widget that will show them no Slots.
+    local_residential_move:
+      mode: manual_review
+      duration_resolver: ''
+      quote_strategy: local_residential_move
+      claims_capacity: false
+      single_driver_service: false
+      review_policy: always_review
+      review_message: 'A move coordinator reviews your home move and confirms the pickup window with you.'
+    local_commercial_move:
+      mode: manual_review
+      duration_resolver: ''
+      quote_strategy: local_commercial_move
+      claims_capacity: false
+      single_driver_service: false
+      review_policy: always_review
+      review_message: 'A move coordinator reviews your commercial move and confirms the pickup window with you.'
+    long_distance_move:
+      mode: manual_review
+      duration_resolver: ''
+      quote_strategy: long_distance_move
+      claims_capacity: false
+      single_driver_service: false
+      review_policy: always_review
+      review_message: 'A move coordinator reviews your long-distance shipment and confirms the pickup window with you.'
+    specialty_item_move:
+      mode: manual_review
+      duration_resolver: ''
+      quote_strategy: specialty_item_move
+      claims_capacity: false
+      single_driver_service: false
+      review_policy: always_review
+      review_message: 'A specialty-item coordinator reviews the item and access details, then confirms the pickup window with you.'
+    diy_truck_rental:
+      mode: manual_review
+      duration_resolver: ''
+      quote_strategy: diy_truck_rental
+      claims_capacity: false
+      single_driver_service: false
+      review_policy: always_review
+      review_message: 'A rental coordinator confirms truck availability and your pickup window before anything is scheduled.'
+
+# What a visitor may book without staff involvement.
+self_bookable:
+  # Only these service_type values are ever self-bookable.
+  #
+  # `courier` is the Courier parent service. It does not exist as a Webform
+  # option yet; it is declared here first so the planner has a stable name to
+  # plan against, and no saved submission is affected by its presence.
+  service_types:
+    - courier
+  # The Delivery Modes a visitor may self-book, and only these. A mode absent
+  # from this list is Manual Review even when the parent service is bookable.
+  delivery_modes:
+    - courier_send
+    - courier_receive
+    - courier_store_pickup
+  # The courier limit. A declared package heavier than this is Manual Review.
+  max_package_lbs: 30
+  # An undeclared weight is unknown, not light: require a declaration.
+  require_declared_weight: true
+  # Require that one driver can handle the package unaided. Kept on: the invariant
+  # is real and eligibility still enforces it.
+  require_single_driver_handling: true
+  # The service types for which one-driver handling is true by definition, so the
+  # fact is derived from the service rather than asked of the customer.
+  #
+  # This is the Courier service policy, and it is read off the Resource: capacity
+  # one, `driver-01-vehicle-01`, one driver and one vehicle. Combined with
+  # max_package_lbs above — a ceiling chosen so a single driver can carry the
+  # package unaided — a `courier` request that is within the limit is by
+  # construction a one-driver job.
+  #
+  # Naming a service here satisfies require_single_driver_handling for that service
+  # and nothing else. It does not touch the weight ceiling, the contents
+  # affirmation, the Store Pickup confirmation, the Delivery Mode allowlist, or
+  # either manual_review list below — a customer who declares a helper need or a
+  # multi_person handling flag is still refused, and refused earlier than this.
+  single_driver_service_types:
+    - courier
+  # Require the affirmation that the package carries nothing prohibited. The quote
+  # will not price an unaffirmed package, so without this the offer would hand out
+  # arrival times for a job the estimate had already sent to staff.
+  require_contents_attestation: true
+  # Store Pickup can only be self-booked when the customer confirms the item is
+  # already paid for and ready at the counter. Without that the driver may arrive
+  # to nothing collectable, so the request goes to staff instead.
+  store_pickup_requires_paid_and_ready: true
+
+# What always goes to staff instead. Manual Review creates no Hold and no
+# Reservation and consumes no Resource capacity.
+manual_review:
+  # Service values that are never self-bookable.
+  #
+  # on_demand_delivery sits here because it is Local Delivery – Van / Truck, not
+  # the Courier service: it presumes a vehicle and a helper, which is more than
+  # the single driver this Resource represents. Its machine value is unchanged so
+  # existing submissions remain readable.
+  service_types:
+    - on_demand_delivery
+    - local_residential_move
+    - local_commercial_move
+    - long_distance_move
+    - specialty_item_move
+    - diy_truck_rental
+  # Persisted vehicle_helper_needs values that imply more than one person, and
+  # therefore more than the single driver this Resource represents.
+  vehicle_helper_needs:
+    - van_1_helper
+    - truck_1_helper
+    - truck_2_helpers
+  # Normalised handling markers that force Manual Review whatever else applies.
+  #
+  # `unsure` is here because uncertainty is not permission. A customer who cannot
+  # say whether the package contains a restricted item has given a real answer,
+  # and it is not "no".
+  handling_flags:
+    - heavy
+    - oversized
+    - restricted
+    - multi_person
+    - unsupported
+    - unsure
+
+# Server-side durations used to derive a Dispatch Window, in minutes.
+#
+# Every figure the planner uses lives here. Nothing below is duplicated as a PHP
+# literal, so an operator can retime the business without a deployment.
+#
+# Maps keyed by a Webform machine value are shipped EMPTY where the option values
+# are not yet known. That is deliberate and safe: an unmapped fact is treated as
+# unknown, which sends the request to Manual Review. It is never treated as zero,
+# because zero would silently shorten a real job and overbook the driver.
+
+# How the planner treats the route figures it is given.
+routing:
+  # FALSE accepts the estimator's conservatively widened figure when Google could
+  # not price traffic for a leg. TRUE makes the planner strict instead: a leg with
+  # no traffic data behind it yields no Slots, and the request reaches staff rather
+  # than being placed on an assumption. Either way the planner never schedules
+  # against an un-widened traffic-free duration.
+  require_traffic_aware: false
+
+# How long a claimed Slot stays reserved while one visitor finishes the form.
+#
+# Held capacity is capacity nobody else can book, so this trades a visitor's time
+# to complete a booking against how long a Slot is withheld from everyone else. It
+# is configuration rather than a PHP literal for the same reason every other
+# duration here is: it is an operational decision, and an unconfigured one makes
+# the planner refuse to claim rather than pick a plausible number.
+holds:
+  hold_seconds: 900
+
+durations:
+  # Fallback work time, used when a service has no more specific rule.
+  pickup_work_minutes: 15
+  delivery_work_minutes: 15
+  # How wide an arrival promise the customer is given around pickup arrival.
+  pickup_promise_minutes: 30
+
+  # Express Courier: dwell at each end plus the A-to-B route. No move-size rules
+  # apply, and the road time is never stated here — it comes from the scheduled
+  # route adapter, per leg, with traffic priced at the actual departure instant.
+  #
+  # The four figures below are Express Courier's own. Where one is left at 0 the
+  # planner falls back to the global equivalent above or on the Resource Profile,
+  # so an operator who never opens this section keeps today's behaviour exactly.
+  courier:
+    pickup_handling_minutes: 10
+    delivery_handling_minutes: 10
+    # Store Pickup replaces the pickup dwell rather than adding to it. Collecting
+    # a paid order from a counter is a different job from taking a package from a
+    # customer's hands: there is a queue, a clerk, and an order to be found. 0
+    # means "no mode-specific figure", and Send's pickup dwell is used instead.
+    store_pickup_dwell_minutes: 15
+    # Express Courier's own end-of-window padding, overriding the Resource
+    # Profile's operational buffer when above 0. A courier window is shorter than
+    # a move, so the same absolute padding is a much larger proportion of it.
+    operational_buffer_minutes: 15
+    # How wide an arrival promise an Express Courier customer is given. Overrides
+    # durations.pickup_promise_minutes when above 0.
+    promise_minutes: 30
+
+  # Residential and local moves. These are latent while `courier` is the only
+  # self-bookable service, but the policy is defined so a move can never inherit
+  # Courier timings merely because its address route happens to be short.
+  move:
+    # Keys are the persisted move_size_residential machine values.
+    move_size_minutes:
+      studio: 120
+      1_br: 180
+      2_br: 300
+      3_br: 420
+      4_br_plus: 540
+      few_items: 60
+    # Applied per flight, using the numeric stairs elements on the Webform.
+    stairs_per_flight_minutes: 15
+    # Keys are persisted access-condition machine values. Empty until mapped: an
+    # unmapped access condition is unknown, so the request goes to staff.
+    access_minutes: {  }
+    # Keys are persisted parking_situation machine values. Empty until mapped.
+    parking_minutes: {  }
+    # Applied per declared specialty item.
+    specialty_item_minutes: 45
+    # Keys are persisted add-on machine values. Empty until mapped; an unmapped
+    # add-on is unknown rather than free.
+    add_on_minutes: {  }
+
+# Which of the two public booking workflows may act for a Webform. Exactly one of
+# them may enforce for any given form: a Hold in the fixed-slot table and a Hold in
+# the planner's table cannot see each other, so two live guards on one form would be
+# two guards holding two different pictures of the same day.
+#
+# Shipped empty, and empty is the whole point. Every existing Webform stays on the
+# fixed-slot workflow it is already running, or on nothing at all, and no handler
+# checkbox can move one: the Dispatch Planner serves a form only once its ID appears
+# below. Task 5 adds the new homepage form here after its offer-only interface
+# exists, which is the same moment the planner starts taking public bookings.
+workflow:
+  dispatch_webforms: {  }

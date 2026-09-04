@@ -175,6 +175,33 @@ final class QuoteSettingsForm extends ConfigFormBase {
       $form['on_demand']['on_demand_' . $key] = $this->numberField($label, $config->get('quote.on_demand.' . $key) ?? 0);
     }
 
+    $form['courier'] = [
+      '#type' => 'details',
+      '#title' => $this->t('Express Courier rates'),
+      '#description' => $this->t('Express Courier is priced from distance and Delivery Mode rather than from crew size, because it is always one driver. Every figure is in cents. Changing any of them means changing the rate version above as well: the version is stamped into each quote so a stored total can be read back against the rates that produced it.'),
+    ];
+    foreach ([
+      'base_cents' => $this->t('Base charge in cents'),
+      'included_miles' => $this->t('Miles included in the base charge'),
+      'excess_distance_cents_per_mile' => $this->t('Excess-mile charge per mile in cents'),
+    ] as $key => $label) {
+      $form['courier']['courier_' . $key] = $this->numberField($label, $config->get('quote.courier.' . $key) ?? 0);
+    }
+    foreach ([
+      'courier_send' => $this->t('Send surcharge in cents'),
+      'courier_receive' => $this->t('Receive surcharge in cents'),
+      'courier_store_pickup' => $this->t('Store Pickup surcharge in cents'),
+    ] as $key => $label) {
+      $form['courier']['courier_mode_' . $key] = $this->numberField($label, $config->get('quote.courier.mode_surcharge_cents.' . $key) ?? 0);
+    }
+    foreach ([
+      'standard' => $this->t('Standard urgency surcharge in cents'),
+      'rush' => $this->t('Rush urgency surcharge in cents'),
+      'expedited' => $this->t('Expedited urgency surcharge in cents'),
+    ] as $key => $label) {
+      $form['courier']['courier_urgency_' . $key] = $this->numberField($label, $config->get('quote.courier.urgency_surcharge_cents.' . $key) ?? 0);
+    }
+
     $form['diy_truck'] = [
       '#type' => 'details',
       '#title' => $this->t('DIY truck-rental rates'),
@@ -243,6 +270,20 @@ final class QuoteSettingsForm extends ConfigFormBase {
     foreach (['van_1_helper_cents', 'truck_1_helper_cents', 'truck_2_helpers_cents', 'rush_cents', 'expedited_cents', 'included_miles', 'excess_distance_cents_per_mile'] as $key) {
       $on_demand[$key] = (int) $form_state->getValue('on_demand_' . $key);
     }
+    $courier = [];
+    foreach (['base_cents', 'included_miles', 'excess_distance_cents_per_mile'] as $key) {
+      $courier[$key] = (int) $form_state->getValue('courier_' . $key);
+    }
+    $courier_modes = [];
+    foreach (['courier_send', 'courier_receive', 'courier_store_pickup'] as $key) {
+      $courier_modes[$key] = (int) $form_state->getValue('courier_mode_' . $key);
+    }
+    $courier['mode_surcharge_cents'] = $courier_modes;
+    $courier_urgency = [];
+    foreach (['standard', 'rush', 'expedited'] as $key) {
+      $courier_urgency[$key] = (int) $form_state->getValue('courier_urgency_' . $key);
+    }
+    $courier['urgency_surcharge_cents'] = $courier_urgency;
     $diy_daily_bases = [];
     foreach (['10_ft', '15_ft', '20_ft', '26_ft'] as $key) {
       $diy_daily_bases[$key] = (int) $form_state->getValue('diy_daily_' . $key);
@@ -275,6 +316,10 @@ final class QuoteSettingsForm extends ConfigFormBase {
         'commercial' => $commercial,
         'specialty' => $specialty,
         'on_demand' => $on_demand,
+        // This form replaces the whole quote key rather than setting paths, so a
+        // rate block missing from this array is erased on the first save. Express
+        // Courier is listed here for that reason, not for ordering.
+        'courier' => $courier,
         'diy_truck' => $diy_truck,
       ])
       ->save();

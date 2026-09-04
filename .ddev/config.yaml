@@ -4,7 +4,10 @@ docroot: .
 php_version: "8.4"
 webserver_type: nginx-fpm
 xdebug_enabled: false
-additional_hostnames: []
+# ppu-qa.ddev.site is the isolated QA site: same codebase, separate database.
+# Browser acceptance runs there so it never writes to the database that holds
+# real submissions. See qa/README.md.
+additional_hostnames: ["ppu-qa"]
 additional_fqdns: []
 database:
     type: mariadb

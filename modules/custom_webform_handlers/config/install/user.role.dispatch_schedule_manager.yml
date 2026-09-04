@@ -1,0 +1,40 @@
+# The dispatcher's role: the whole of the day-to-day schedule, and no money.
+#
+# Specification item 7's first role. It is the largest of the three and still not an
+# administrator: it can run the board, withhold time, free capacity a claim holds,
+# replan a Reservation onto a proved new time, and price a job — but it cannot
+# configure the operating profile, cannot see what anybody paid, and cannot read a
+# customer's contact detail.
+#
+# The two absences are the point of item 8's split, so each is worth naming.
+#
+# No 'view dispatch financial details'. A scheduler decides what a job costs and is
+# still not a person who may audit takings; the approval screen prices the job in
+# front of them without showing them the figure on any other job. If the same human
+# does both, that is two roles on one account, said explicitly.
+#
+# No 'view dispatch customer contact'. Moving vans around does not require holding a
+# list of names and telephone numbers. The board shows this role a service summary
+# and the exact addresses it genuinely needs to plan a journey, and stops there.
+#
+# No Commerce permission of any kind, which is the "no payment admin" in item 7 taken
+# literally: this role cannot refund, capture, void, or edit an order. Payment state
+# is the third role's business.
+langcode: en
+status: true
+dependencies:
+  module:
+    - custom_webform_handlers
+id: dispatch_schedule_manager
+label: 'Schedule Manager'
+weight: 5
+is_admin: false
+permissions:
+  # What work exists, in what state, when.
+  - 'view dispatch board'
+  # Blackouts, release, replan, and booking a request held for staff review.
+  - 'manage dispatch schedule'
+  # Where the van actually goes, because this is the role that plans the journey.
+  - 'view dispatch exact addresses'
+  # Take a request under review, quote it, decline it, cancel it.
+  - 'review dispatch quotes'

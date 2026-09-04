@@ -16,10 +16,16 @@
     ],
     "require": {
         "composer/installers": "^2.0",
-        "drupal/core-composer-scaffold": "^11.4",
-        "drupal/core-project-message": "^11.4",
+        "drupal/address": "^2.0",
+        "drupal/advancedqueue": "^1.6",
+        "drupal/commerce": "^3.3",
+        "drupal/core-composer-scaffold": "^10.6",
+        "drupal/core-project-message": "^10.6",
         "drupal/core-recommended": "^10.6",
         "drupal/core-vendor-hardening": "^10.3",
+        "drupal/eca": "^2.1",
+        "drupal/geocoder": "^4.0",
+        "drupal/redis": "^1.11",
         "drupal/webform": "^6.3",
         "drush/drush": "^13.6"
     },
@@ -96,5 +102,8 @@
                 "      composer remove drupal/core-project-message"
             ]
         }
+    },
+    "require-dev": {
+        "drupal/core-dev": "^10.6"
     }
 }

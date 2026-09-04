@@ -1,0 +1,145 @@
+/**
+ * @file
+ * The Dispatch Planner board's operations layer.
+ *
+ * Loaded with the script and only for an operator who may act, so every rule here
+ * describes a control that exists. Nothing in this file positions the board itself
+ * — that is dispatch_planner_board.css, which stands alone with scripting off.
+ *
+ * Three states are drawn and each is drawn twice: armed, pending, and drop target
+ * all carry a shape or a word as well as a colour, because an operator who cannot
+ * distinguish a tint must still be able to tell what is about to move where. The
+ * live region above the board says the same three things in a sentence.
+ */
+
+.cwh-dispatch-ops__status {
+  margin: 0 0 1rem;
+  padding: 0;
+  font-size: 0.95rem;
+}
+
+/* Said something, so it becomes a visible notice rather than empty space. */
+.cwh-dispatch-ops__status--said {
+  padding: 0.5rem 0.75rem;
+  border-left: 4px solid var(--cwh-window, #1a4f7a);
+  background: #f1f6fa;
+}
+
+.cwh-dispatch-ops__status--error {
+  border-left-color: var(--cwh-blackout, #6b1d1d);
+  background: #fcf4f4;
+}
+
+.cwh-dispatch-planner__withhold {
+  margin: 0 0 0.75rem;
+}
+
+/*
+ * A movable row. The grab cursor is an affordance and not the interface: the Move
+ * button in the same row is what makes the operation reachable.
+ */
+.cwh-dispatch-planner__movable {
+  cursor: grab;
+}
+
+.cwh-dispatch-planner__movable.is-armed {
+  outline: 2px solid var(--cwh-window, #1a4f7a);
+  outline-offset: -2px;
+  background: #eef4f9;
+}
+
+/* Waiting on the server. The row is dimmed and named as busy by the sentence. */
+.cwh-dispatch-planner__movable.is-pending {
+  cursor: progress;
+  opacity: 0.65;
+}
+
+.cwh-dispatch-planner__movable.is-pending > td:first-child::before {
+  content: '⟳ ';
+}
+
+.cwh-dispatch-ops--busy .cwh-dispatch-planner__movable {
+  cursor: default;
+}
+
+/*
+ * The button that arms a row, sitting in the operations cell beside the two links
+ * that do the same work on a page of their own.
+ */
+.cwh-dispatch-ops__grab {
+  margin: 0 0 0 0.35rem;
+  padding: 0.1rem 0.5rem;
+  border: 1px solid #8e9aa4;
+  border-radius: 2px;
+  background: #fff;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  cursor: pointer;
+}
+
+.cwh-dispatch-ops__grab[aria-pressed='true'] {
+  border-color: var(--cwh-window, #1a4f7a);
+  background: var(--cwh-window, #1a4f7a);
+  color: #fff;
+}
+
+/*
+ * The button that accepts a move, one per day. It only exists while something is
+ * armed, so it is never a control offering to move nothing.
+ */
+.cwh-dispatch-ops__target {
+  display: block;
+  width: 100%;
+  margin: 0 0 0.75rem;
+  padding: 0.4rem 0.6rem;
+  border: 2px dashed var(--cwh-window, #1a4f7a);
+  border-radius: 3px;
+  background: #f1f6fa;
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cwh-dispatch-ops__target:disabled {
+  border-style: solid;
+  cursor: progress;
+  opacity: 0.6;
+}
+
+/* The day a pointer is currently over, or the one a proposal is being proved for. */
+.cwh-dispatch-planner__day.is-drop-target {
+  box-shadow: 0 0 0 2px var(--cwh-window, #1a4f7a);
+}
+
+.cwh-dispatch-planner__day.is-drop-target > .cwh-dispatch-ops__target {
+  background: #e2edf6;
+}
+
+/*
+ * Focus is never removed and never left to the browser's default hairline: the
+ * whole keyboard path runs through these two buttons.
+ */
+.cwh-dispatch-ops__grab:focus-visible,
+.cwh-dispatch-ops__target:focus-visible {
+  outline: 3px solid #0b5fff;
+  outline-offset: 1px;
+}
+
+.cwh-dispatch-ops__grab:focus,
+.cwh-dispatch-ops__target:focus {
+  outline: 3px solid #0b5fff;
+  outline-offset: 1px;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .cwh-dispatch-ops__target {
+    transition: background-color 120ms ease-in-out;
+  }
+}
+
+@media (forced-colors: active) {
+  .cwh-dispatch-planner__movable.is-armed,
+  .cwh-dispatch-planner__day.is-drop-target {
+    outline: 2px solid CanvasText;
+  }
+}

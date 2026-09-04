@@ -1,0 +1,153 @@
+# Dispatch notification defaults.
+#
+# Notifications sit around the confirmed planner state and never inside it. Nothing
+# configured here can withhold capacity, move a Reservation, or change what the
+# calendar offers; every message describes something that has already committed.
+#
+# Templates may use these placeholders and no others:
+#   [arrival]         the promised pickup arrival, in the operating timezone
+#   [arrival_window]  the proved window, as start – end
+#   [window_date]     the day the window falls on
+#   [date]            the day of the promised arrival
+#   [timezone]        the operating timezone those times are stated in
+#   [delivery_mode]   how the delivery runs, in customer-facing words
+#   [reservation]     the Reservation identifier
+#   [superseded]      the Reservation a move replaced (staff templates only)
+#   [submission]      the submission identifier
+#   [webform]         the Webform identifier
+#   [resource]        the Resource identifier
+#   [detail]          the operator-safe reason recorded with the event
+#   [contact]         the contact line configured below
+#   [site_name]       this site's name
+#   [event]           the event's own name
+#
+# There is no placeholder for a customer's name, address, telephone number or any
+# other answer they gave. That is a deliberate boundary rather than an omission: it
+# means no template — however it is edited — can put one customer's detail into any
+# message, and the staff copies are safe by construction.
+enabled: false
+events:
+  reservation_confirmed: true
+  reservation_replanned: true
+  reservation_released: true
+  # Closures and their withdrawal are ordinary operational bookkeeping. Off by
+  # default so the team is not mailed about work it is doing on the board in front
+  # of it; turn them on if closures are entered by somebody other than the people
+  # who need to know.
+  time_withheld: false
+  time_returned: false
+  manual_review_raised: true
+recipients:
+  staff: ''
+  customer_email_field: ''
+  contact_line: ''
+templates:
+  reservation_confirmed:
+    customer:
+      subject: 'Your collection is booked for [date]'
+      body: |
+        Your booking is confirmed.
+
+        Arrival: [arrival]
+        We expect to be with you between [arrival_window] ([timezone]).
+        Delivery: [delivery_mode]
+        Booking reference: [reservation]
+
+        The window is the promise. We aim for the arrival time inside it, and if
+        anything changes we will write to you again.
+
+        [contact]
+        [site_name]
+    staff:
+      subject: 'Booked: [reservation] on [resource], [date]'
+      body: |
+        A booking has been confirmed against the calendar.
+
+        Reservation: [reservation]
+        Resource: [resource]
+        Arrival: [arrival]
+        Window: [arrival_window] ([timezone])
+        Submission: [submission] on [webform]
+  reservation_replanned:
+    customer:
+      subject: 'Your collection has moved to [date]'
+      body: |
+        We have had to move your booking.
+
+        New arrival: [arrival]
+        New window: [arrival_window] ([timezone])
+        Delivery: [delivery_mode]
+        Booking reference: [reservation]
+
+        Nothing else about your booking has changed. If this time does not work,
+        reply to this message and we will find another.
+
+        [contact]
+        [site_name]
+    staff:
+      subject: 'Moved: [reservation] on [resource], [date]'
+      body: |
+        A confirmed booking has been moved through the Replan transaction.
+
+        Reservation now: [reservation]
+        Superseded: [superseded]
+        Resource: [resource]
+        Arrival: [arrival]
+        Window: [arrival_window] ([timezone])
+        Submission: [submission] on [webform]
+  reservation_released:
+    customer:
+      subject: 'Your collection on [date] has been released'
+      body: |
+        Your booking has been released and is no longer scheduled.
+
+        It had been booked for [arrival].
+        Booking reference: [reservation]
+
+        If this is not what you expected, reply to this message and we will sort it
+        out.
+
+        [contact]
+        [site_name]
+    staff:
+      subject: 'Released: [reservation] on [resource]'
+      body: |
+        A confirmed booking has been released and its time returned to the calendar.
+
+        Reservation: [reservation]
+        Resource: [resource]
+        Had been booked for: [arrival]
+        Reason recorded: [detail]
+        Submission: [submission] on [webform]
+  time_withheld:
+    staff:
+      subject: 'Closed: [resource] on [window_date]'
+      body: |
+        Time has been withheld from the calendar.
+
+        Resource: [resource]
+        Closed: [arrival_window] on [window_date] ([timezone])
+        Reason recorded: [detail]
+
+        The closure was proved against the work already booked, so nothing
+        confirmed has been overwritten.
+  time_returned:
+    staff:
+      subject: 'Closure withdrawn on [resource]'
+      body: |
+        A closure has been withdrawn and the time is being offered again.
+
+        Resource: [resource]
+        Reason recorded: [detail]
+  manual_review_raised:
+    staff:
+      subject: 'Needs review: submission [submission]'
+      body: |
+        A request could not be scheduled automatically and is waiting for a person.
+
+        Submission: [submission] on [webform]
+        Resource considered: [resource]
+        Reason recorded: [detail]
+
+        No time is held for this request. Nothing is reserved until somebody books
+        it from the board, and the quote the customer saw is preliminary.

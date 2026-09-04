@@ -1,0 +1,47 @@
+# Service Type popularity ranking.
+#
+# This file controls presentation and nothing else. Every value below can be changed,
+# or the whole feature switched off, without affecting what a visitor is allowed to
+# book, what a Slot costs, what capacity exists, or what happens to a booking already
+# in progress. Eligibility lives in custom_webform_handlers.dispatch; this file only
+# decides what order the service cards appear in.
+#
+# Express Courier is not configurable here. It is pinned first in PHP — see
+# ServicePopularitySnapshot::PINNED_FIRST — because it is the only self-bookable
+# service, and a ranking that could push it below a service that leads to a staff
+# review would be worse than no ranking at all.
+
+# Whether measured popularity may reorder the cards at all.
+#
+# Off means the configured Webform option order is used, which is the same order the
+# form has always had. The switch is here so that an operator who dislikes what the
+# measurement is doing to their page can stop it immediately, without a deployment and
+# without editing the form.
+enabled: true
+
+# How many days of settled bookings one snapshot counts.
+#
+# A quarter. Long enough that a single slow fortnight cannot rearrange the page, short
+# enough that last year's mix of work does not outvote this season's. Clamped to
+# 7–730 days when read, so a mistyped value cannot silently disable the feature or
+# rank today's page by services the business no longer runs.
+window_days: 90
+
+# How many bookings must fall inside the window before anything is reordered.
+#
+# Below this the counts are real but not yet meaningful: with a handful of bookings one
+# customer's choice decides a rank, and the cards would visibly shuffle from week to
+# week for no reason a visitor could perceive. Twenty-five is the point at which a
+# single booking is worth less than four per cent of the total.
+#
+# Until the threshold is met — which is the state of every new site, and of this one —
+# the configured order is used. That is a deliberate default, not a degraded mode.
+minimum_samples: 25
+
+# How long a computed order may be served from cache, in seconds.
+#
+# The snapshot changes once a night and the question is asked on every render of a
+# public page, so the cache is doing real work. Writing a new snapshot invalidates
+# these entries immediately; the TTL is what bounds staleness when a cache backend is
+# shared, replaced, or flushed and the invalidation is lost. Clamped to 60–86400.
+cache_ttl: 3600
