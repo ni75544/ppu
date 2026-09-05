@@ -687,6 +687,35 @@ prove the credential is present, accepted, and distinct from the browser key, bu
 proving a restriction list needs cloud tooling that is not available here. That is
 recorded as an attestation, not as a machine-verified fact.
 
+### 11.10 Correction — what the recovery evidence does and does not establish (2026-09-05)
+
+Appended rather than folded into §11.9, because the point of a correction is that the
+earlier reading stays visible. §11.9 already discloses the first window's two
+movements and states that no clean-release claim rests on it; what the record did not
+yet state is the *rule* that follows from them. Four statements, in the order they
+matter:
+
+- Routes and Courier functionality recovered successfully.
+- The first active full A/B/C sentinel window did not meet raw no-mutation criteria.
+- The final green window proved functional browser behavior.
+- Manual Review advisory diagnostics and external cron housekeeping require
+  two-surface verification for a final release attestation.
+
+The fourth is the operative one. A refusal scenario writes one advisory diagnostic row
+by design, and a concurrent cron process can delete queue and log rows during any
+window, so a full A/B/C set on the active site cannot be expected to be raw
+mutation-clean — and weakening the sentinel until it is would destroy the only
+guardrail that would catch a real write. The resolution is to split the question
+across two surfaces: run the complete negative set where a write is acceptable, and
+ask the active site only the question a customer asks, under a zero-movement
+requirement across every protected family.
+
+That model was carried out on 2026-09-05 and is recorded in
+`docs/releases/2026-09-05-courier-release-attestation.md`. Read §11.9 as the recovery
+record and that document as the release claim; neither supersedes the configuration
+verdict in §11.7, which stands.
+
+
 
 
 

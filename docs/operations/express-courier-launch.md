@@ -469,5 +469,31 @@ that requires cloud tooling or console access. Where neither is available, recor
 restriction verification as **operator-attested** and say so; do not present it as
 machine-proven.
 
+### B.6 Before claiming a release: verify on two surfaces
+
+B.3 verifies the credential. A release claim is a bigger question, and it cannot be
+answered on the live site alone, for one structural reason: a request the planner
+routes to Manual Review writes one advisory diagnostic row by design. Running the
+refusal cases against the live site therefore *has* to produce a write, and the only
+ways to make that window look clean are to weaken the guardrail or to explain the row
+away — both of which destroy the thing you were trying to measure.
+
+Split the question instead:
+
+| Surface | Run | Requirement |
+| --- | --- | --- |
+| QA (isolated database) | the full valid / unattested / overweight set, both widths | every assertion green; the only advisory rows allowed are exactly the Manual Review category, counted and reported separately |
+| Live | the valid eligible flow only, both widths | every assertion green **and** zero movement in every protected family |
+
+Two rules make the split honest. The live-surface wrapper must be *incapable* of
+running the refusal cases — assert the scenario list against a valid-flow-only pattern
+before opening a browser, so widening it fails loudly. And a movement on the live
+surface is never explained away as advisory, cron, expected or harmless: classify it
+and stop, or fix it. Housekeeping rows written by Drupal's own cron are named and
+counted where they occur, not waived.
+
+The worked example is `docs/releases/2026-09-05-courier-release-attestation.md`.
+
+
 
 
