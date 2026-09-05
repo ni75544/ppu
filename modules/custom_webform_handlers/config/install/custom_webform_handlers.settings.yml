@@ -44,7 +44,10 @@ quote:
       few_items: 29500
     travel_speed_mph: 30
     travel_hourly_cents: 11000
-    round_trip_multiplier: 2
+    # Declared float in the schema, so it is shipped as a float. A bare `2` installs
+    # as an integer and every later comparison against the stored value sees a type
+    # change where no value changed.
+    round_trip_multiplier: 2.0
   fees:
     stairs_per_flight_cents: 1750
     passenger_elevator_cents: 3500

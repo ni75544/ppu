@@ -313,6 +313,9 @@ Ordered so each step is provable before the next. No step requires a broad
 
 NOT YET REPRODUCIBLE
 
+> Superseded on 2026-09-04 by [§11.7](#117-verdict). Kept as the audit's original
+> finding, because the remediation is only legible against it.
+
 Nine required capabilities fail the test. Two of them — the Express Courier form
 `webform.webform.hg` and the homepage block `block.block.hg_express_courier_home`
 — exist only in the active database, and the mechanism that created them, an
@@ -339,6 +342,236 @@ already applied to a database that existed before the run. They cannot speak for
 database that has never seen those hooks. Until Task 18B closes the nine blockers
 and proves the result on a clean isolated database, "it works here" is the only
 claim the evidence supports.
+
+## 11. Task 18B resolution — 2026-09-04
+
+Section 9's verdict is superseded by [§11.7](#117-verdict) below. The nine
+blockers it counted are closed; a tenth condition, outside configuration, is not.
+
+### 11.1 Each blocker family and its committed source of truth
+
+| Blocker | Committed source of truth | State |
+| --- | --- | --- |
+| B1 `webform.webform.hg` | `config/install/webform.webform.hg.yml` | added |
+| B2 `block.block.hg_express_courier_home` | `config/install/block.block.hg_express_courier_home.yml` | added |
+| B3 `custom_webform_handlers.dispatch` ships closed | `config/install/custom_webform_handlers.dispatch.yml` — `workflow.dispatch_webforms` now carries 1 entry, `hg` | reconciled |
+| B4 `views.view.dispatch_reservations` drift | `config/install/views.view.dispatch_reservations.yml` | reconciled |
+| B5 `user.role.dispatch_schedule_manager` drift | `config/install/user.role.dispatch_schedule_manager.yml` | reconciled |
+| B6 `custom_webform_handlers.settings` drift | `config/install/custom_webform_handlers.settings.yml` | reconciled |
+| B7 `commerce_store` has no creator | `src/Install/CommerceStoreInstaller.php`, invoked from `custom_webform_handlers_install()` | added |
+| B8 `core.extension` is database-only | `custom_webform_handlers.info.yml` — 9 declared dependencies | added |
+| B9 `webform.webform.da` unowned | classified, deliberately not packaged — [§11.8](#118-the-legacy-artifact-left-where-it-is) | classified |
+
+B1 and B2 were the two objects that existed only in the active database. Both are
+now files, so the mechanism that created them — an update hook a fresh install
+skips — is no longer the only path to them.
+
+B8 is answered by declared dependencies, not by versioning `core.extension`. The
+clean install named the set that is actually required, which is what the
+`.info.yml` now carries; the remaining enabled modules on the active site are
+site-level choices that a module has no standing to assert.
+
+B9 is the one blocker closed by a decision rather than a file.
+
+### 11.2 Environment-only values excluded, by category
+
+Nothing in the packaged baseline carries an environment value. Excluded, by
+category only:
+
+- Google Maps browser and server API keys — the browser key ships as an empty
+  string in `custom_webform_handlers.settings`; the server key is read from
+  `Settings` and has no configuration object at all, by design.
+- Payment gateway credentials — no `commerce_payment_gateway` object is packaged,
+  matching the active site, where none exists either.
+- Absolute filesystem paths, database connection strings, and site identity
+  (`uuid`, `_core.default_config_hash`).
+- Derived Views cache and render metadata that Views recalculates on save.
+- Customer data, review codes, session identifiers and tokens: no submission,
+  reservation, order, payment or review row is packaged, and no content entity is
+  exported.
+
+Retained deliberately, because they are operational and not environmental: every
+`route_*` tuning key in `custom_webform_handlers.settings`, the whole Dispatch
+resource profile, the grid, buffers, horizon, hold seconds, duration model,
+eligibility policy and the New York public-time / UTC storage split.
+
+### 11.3 Drift reconciliation, classified
+
+Every difference between a shipped file and its active value was classified before
+being resolved. No active required value was discarded.
+
+**Required portable value — active wins.** `custom_webform_handlers.dispatch`
+carried a fictional shipped default: a resource id that does not exist, a six-day
+week, a lunch break, buffers roughly four times the real ones, and an empty
+allowlist. Reconciled to the active, verified values at `resource.id`,
+`resource.working_hours`, `resource.breaks`,
+`resource.repositioning_buffer_minutes`, `resource.operational_buffer_minutes`,
+`resource.return_to_base`, `durations.pickup_work_minutes`,
+`durations.delivery_work_minutes` and `workflow.dispatch_webforms`.
+
+**Required portable value — shipped wins, and the active site was behind.** Two
+cases, and both are findings rather than bookkeeping:
+
+- `recipients.customer_email_field` had no schema entry, so a value the running
+  site depends on could not be expressed in a packaged file at all. The key is now
+  shipped and `config/schema/custom_webform_handlers.schema.yml` declares it.
+- `manual_review.handling_flags` shipped 6 entries against 5 active. The missing
+  one is `unsure`, which is not decorative: the module's own handler maps an
+  attestation that is absent, unchecked or crafted to `unsure` before Dispatch sees
+  the request, and the request factory reads it as the customer declining to
+  vouch. With the flag absent from the list, that request is read as a clean
+  answer instead of routing to Manual Review. `custom_webform_handlers_update_10040`
+  adds it by addition only, and both local sites now carry 6.
+
+**Obsolete shipped default.** `views.view.dispatch_reservations` listed `user` and
+`views` under `dependencies.module`; `user` was left over from the core `perm`
+access plugin that the custom `dispatch_board_audience` plugin replaced, and Views
+does not list itself. Removed.
+
+**No value change, but a false-drift source.** `quote.round_trip_multiplier`
+shipped as `2` where the schema declares a float, so it installed as an integer and
+every later comparison saw a type change where no value had changed; it now ships
+as `2.0`. `user.role.dispatch_schedule_manager` held the same four permissions in a
+different order from the one Drupal stores; reordered, set unchanged.
+
+B4, B5 and B6 are therefore downgraded: measured as drift, they were an
+authored-order difference, a type mismatch, and a stale `dependencies.module`
+entry — none of them a capability a clean install would have lacked. B6's five
+"shipped-only" routing keys were the shipped file being ahead of a stored copy
+that predates them, so they are retained as-is.
+
+### 11.4 Fresh-install bootstrap
+
+A fresh install runs no `hook_update_N` at all: Drupal stamps the schema version
+and skips every one of them. The clean install therefore had to work from
+`hook_schema()`, `config/install`, `config/optional` and `hook_install()` alone,
+and that is what was built.
+
+`custom_webform_handlers_install()` calls `CommerceStoreInstaller::ensureStore()`
+through the `custom_webform_handlers.store_installer` service. It is idempotent by
+construction — it returns `kept` when any store already exists and only creates one
+when none does, so it can never produce a second store — and it is separate from
+the 39 historical migration hooks, which remain untouched migration logic for
+already-installed sites. Core runs `hook_install()` after `config/install` is
+imported, so the packaged Dispatch profile is already present when the store is
+created and the store is given the profile's own timezone.
+
+The two Advanced Queue queues needed no bootstrap code in either direction.
+`ConfigInstaller::installDefaultConfig()` installs an extension's own
+`config/optional`, and also installs *other* extensions' optional config that
+depends on it — so enabling `advancedqueue` after the module materialised both
+queue objects with no code involved. Advanced Queue and ECA stay optional by
+design: neither is a declared dependency, and their objects live in
+`config/optional` precisely so a site without them still installs.
+
+One install-time requirement is worth naming because it is invisible in the module:
+`block.block.hg_express_courier_home` is placed in an Olivero region, so the theme
+must be present and default when the block is installed. On the standard profile it
+is, which is why the clean install placed the block without intervention.
+
+### 11.5 The clean-install proof
+
+Method. A throwaway database whose name begins `task18b_repro_`, proven before
+creation to be neither the active database nor an existing one, and a temporary
+site directory under `sites/task18b_repro_*` only — the active site's settings were
+never edited, and the temporary directory was named after its own hostname so Drush
+resolved it without a `sites.php` change. Drupal was installed into it with the
+standard profile using the code already on disk, then `custom_webform_handlers` was
+enabled through the ordinary module-install path. Nothing was copied from the active
+database and no broad configuration export was taken at any point.
+
+Result: **22 assertions, 0 failures.** By name and count only —
+
+- the module installed, and its schema version was stamped at the newest hook
+  without any hook running;
+- all six required objects present: `webform.webform.hg`,
+  `block.block.hg_express_courier_home`, `custom_webform_handlers.dispatch`,
+  `custom_webform_handlers.settings`, `views.view.dispatch_reservations`,
+  `user.role.dispatch_schedule_manager`;
+- the Dispatch allowlist non-empty, 1 entry;
+- `webform.webform.da` absent, and referred to by 0 packaged objects;
+- every table `hook_schema()` declares: 9 declared, 0 missing;
+- exactly 1 Commerce store, exactly 1 flagged default, resolvable through
+  `commerce_store.current_store`, on the packaged timezone, in USD, of the expected
+  bundle, with at least one currency imported;
+- the Dispatch role loaded with 4 permissions and not an admin role;
+- both Advanced Queue objects present after the optional module was enabled.
+
+Table growth across the run: 59 core, 105 after the module, 106 after the optional
+queue module.
+
+Cleanup. The temporary database was dropped and its temporary grant revoked, the
+temporary site directory removed, and the container-private key stash destroyed,
+each step guarded by an explicit name test and by a proof that the active database
+name differs from the target. Afterwards: 0 databases and 0 directories matching
+`task18b_repro_*` remain; the active database is present with its table count
+unchanged; the active and QA site directories are intact. The active database was
+never exported, copied, imported, replaced, truncated or modified.
+
+### 11.6 The remaining condition, which is not configuration
+
+The availability probe — a non-persistent, read-only `offerSlots()` call with
+public landmark fixture coordinates on a future operating date derived from the
+packaged working hours, never hardcoded — returned **0 eligible slots** on the
+clean site. Everything the packaged configuration governs succeeded: the resource
+profile built from packaged configuration alone, the operating date was derived
+from it, and the fixture request passed eligibility with both endpoints and a weight
+inside the limit. The single failure is the external route estimate.
+
+Diagnosed, not worked around. A slot cannot exist without the pickup→delivery route
+leg, and the route provider returned HTTP 403 `PERMISSION_DENIED`. Classified by
+reason, the response is a referrer restriction — not a disabled service, not a
+blocked IP, not an invalid key, not billing. The environment's other Google key,
+which is a different value, classifies identically. Both keys available here are
+browser-referrer-restricted, which the Routes API refuses for a server-side call.
+
+The control that settles the cause: the same probe, on the fully-configured QA site
+that scored a green browser gate on 2026-08-30, returns the identical 403 and the
+identical 0 slots. The same configuration that produced real slots six days ago
+produces none today, on a site this task never repackaged. This is an environment
+credential regression, not a packaging defect, and the correct fix is a
+server-authorized key supplied by the environment — never a key committed to Git.
+
+Write discipline held throughout. On the clean site the only table that moved was
+`watchdog`, by the two rows recording the route failure; `tables_added=0` and all
+seven prohibited families — submission, reservation, hold, order, payment, queue
+job — were unchanged. The same held on the QA control.
+
+### 11.7 Verdict
+
+**Configuration: REPRODUCIBLE.** A database that has never seen an update hook now
+receives every required configuration object, the Dispatch schema, the Dispatch
+role, the Reservation Dashboard, the Express Courier form, its homepage placement,
+and exactly one Commerce store, from versioned module code alone — proven at 22
+assertions with 0 failures on a throwaway database, with no active-database copy
+and no broad export.
+
+**End-to-end Courier booking: NOT YET PROVEN, for one non-configuration reason.**
+The ≥1-eligible-slot proof cannot pass anywhere in this environment, including on
+the site that passed it six days ago, because no Google key available here is
+authorized for server-side Routes calls. The sentinel-wrapped browser gate run
+against the QA site scored 78 of 112 assertions, red at both widths — 39/56 desktop
+and 39/56 mobile — and every failure is downstream of zero slots and an unrefreshed
+estimate. The gate wrote no submission, reservation, order, checkout attempt or
+review row; the one gated probe that moved was the error-log watermark, recording
+the route failure itself.
+
+The honest form of the verdict is therefore two-part. The reproducibility blockers
+this audit raised are closed and proven. Release attestation stays blocked on a
+credential the repository must never contain.
+
+### 11.8 The legacy artifact, left where it is
+
+`webform.webform.da` is deliberately **not packaged**. It is referred to by 0
+packaged objects, and the clean install asserted both its absence and the absence of
+any dependency on it. It is equally deliberately **not deleted** from the active
+database, where it remains a legacy artifact and nothing else. It was neither
+shipped by accident nor lost by accident, which was the whole point of classifying
+it before any export was written.
+
+
+
+
 
 
 

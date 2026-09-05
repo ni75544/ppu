@@ -1,0 +1,1271 @@
+# The Express Courier booking form.
+#
+# This is the one Webform the Dispatch Planner is allowed to act for; the allowlist
+# that grants it is custom_webform_handlers.dispatch :: workflow.dispatch_webforms.
+# Until Task 18B this form existed only in the active database, which is what made a
+# fresh install unable to reproduce the Courier baseline: the planner, the roles, the
+# ledger and the queue all installed, and there was no form for any of them to serve.
+#
+# It is versioned as an export rather than hand-authored, so it is deliberately free
+# of the commentary the rest of this module's configuration carries. Editing it by
+# hand is not the intended workflow — change it in the UI on a working site and
+# re-export it. Two things in it are worth knowing before doing that:
+#
+# 1. `preferred_service_date` is the single authoritative Courier date. The widget's
+#    older nameless duplicate was deleted in update_10033 and the offer endpoint
+#    refuses a request body whose date disagrees with it. Re-introducing a second
+#    date element re-opens that defect.
+# 2. Elements carrying `#access_create_roles: {  }` are retired questions, not dead
+#    ones. They are no longer asked and crafted input to them is ignored, while the
+#    answers historic submissions already hold stay readable.
+#
+# Access is `create` for anonymous and authenticated only. No role that this module
+# defines appears here, so the form installs before any of them exist.
+#
+# @see custom_webform_handlers.dispatch
+# @see block.block.hg_express_courier_home
+langcode: en
+status: open
+dependencies:
+  module:
+    - custom_webform_handlers
+weight: 0
+open: null
+close: null
+uid: 1
+template: false
+archive: false
+id: hg
+title: hg
+description: ''
+categories: {  }
+elements: |-
+  page_1:
+    '#type': webform_wizard_page
+    '#title': '1. Route & Service'
+    '#wizard_progress_bar': true
+    '#wizard_progress_percentage': true
+    '#description': 'Choose a service, then give us the addresses and the facts about what is being carried. A preliminary estimate appears once there is enough to calculate one.'
+    service_type:
+      '#type': radios
+      '#title': 'What type of service do you need?'
+      '#options':
+        courier: 'Express Courier'
+        local_residential_move: 'Local Residential Move'
+        local_commercial_move: 'Local Commercial/Office Move'
+        long_distance_move: 'Long-Distance Move'
+        specialty_item_move: 'Specialty Item Move (Standalone)'
+        diy_truck_rental: 'DIY Truck Rental'
+        on_demand_delivery: 'On-Demand / Small Delivery'
+      '#required': true
+      '#attributes':
+        aria-required: true
+        class:
+          - custom-service-cards
+    delivery_mode:
+      '#type': radios
+      '#title': 'Delivery Mode'
+      '#options':
+        courier_send: 'Send — we collect from you and deliver it'
+        courier_receive: 'Receive — we collect from someone else and bring it to you'
+        courier_store_pickup: 'Store Pickup — we collect an order you have already paid for'
+      '#description': 'Express Courier runs as one driver, one pickup, and one delivery.'
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: courier
+        required:
+          ':input[name="service_type"]':
+            value: courier
+    address:
+      '#type': fieldset
+      '#title': Address
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            filled: true
+      '#collapsible': true
+      '#collapsed': false
+      address_row:
+        '#type': webform_flexbox
+        '#attributes':
+          class:
+            - custom-courier-row
+            - custom-courier-row--address
+        origin_address:
+          '#type': textfield
+          '#title': From
+          '#description': 'Enter starting address (e.g., street, city, state, ZIP). Autocomplete available.'
+          '#required': true
+          '#flex': 1
+        destination_address:
+          '#type': textfield
+          '#title': To
+          '#description': 'Enter destination address. Distance will auto-calculate for better quote accuracy.'
+          '#required': true
+          '#flex': 1
+      calculated_distance:
+        '#type': hidden
+        '#title': calculated_distance
+      calculated_distance_meters:
+        '#type': hidden
+        '#title': 'Distance in meters'
+    courier_details:
+      '#type': fieldset
+      '#title': 'Express Courier Details'
+      '#description': 'Express Courier runs as one driver, one pickup, and one delivery. A request beyond the currently configured weight, route, or handling limits is reviewed by staff instead of being booked online.'
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: courier
+      '#collapsible': true
+      '#collapsed': false
+      package_description:
+        '#type': textarea
+        '#title': 'What are we carrying?'
+        '#rows': 3
+        '#description': 'Describe the package plainly, for example "a laptop in a padded box" or "two boxes of documents".'
+        '#access_create_roles': {  }
+      courier_package_row:
+        '#type': webform_flexbox
+        '#attributes':
+          class:
+            - custom-courier-row
+            - custom-courier-row--package
+        total_weight_lbs:
+          '#type': number
+          '#title': 'Weight (lb)'
+          '#min': 0
+          '#step': 0.1
+          '#description': 'Total weight of everything together, in pounds.'
+          '#states':
+            required:
+              ':input[name="service_type"]':
+                value: courier
+          '#flex': 1
+        courier_handling:
+          '#type': container
+          '#attributes':
+            class:
+              - custom-courier-handling
+          courier_prohibited_ack:
+            '#type': checkbox
+            '#title': 'I confirm this package contains no prohibited, hazardous, illegal, perishable, live, cash, or weapon items.'
+            '#description': 'Required to book online. Anything on that list is reviewed by staff instead.'
+            '#attributes':
+              class:
+                - custom-courier-attestation
+            '#states':
+              visible:
+                ':input[name="service_type"]':
+                  value: courier
+              required:
+                ':input[name="service_type"]':
+                  value: courier
+          single_driver_handling:
+            '#type': radios
+            '#title': 'Can one person carry this without help?'
+            '#description': 'Express Courier sends a single driver. Anything needing two people is reviewed by staff instead of being booked online.'
+            '#options':
+              1: 'Yes, one person can carry it'
+              0: 'No, it needs two people'
+            '#access_create_roles': {  }
+          '#flex': 1
+      total_weight_unit:
+        '#type': hidden
+        '#title': 'Weight unit'
+        '#default_value': lb
+      store_pickup_details:
+        '#type': fieldset
+        '#title': 'Store Pickup details'
+        '#states':
+          visible:
+            ':input[name="service_type"]':
+              value: courier
+            ':input[name="delivery_mode"]':
+              value: courier_store_pickup
+        store_pickup_merchant:
+          '#type': textfield
+          '#title': 'Store or merchant name'
+          '#states':
+            required:
+              ':input[name="service_type"]':
+                value: courier
+              ':input[name="delivery_mode"]':
+                value: courier_store_pickup
+        store_pickup_order_reference:
+          '#type': textfield
+          '#title': 'Order or confirmation number'
+          '#description': 'What the counter staff will look the order up by.'
+          '#states':
+            required:
+              ':input[name="service_type"]':
+                value: courier
+              ':input[name="delivery_mode"]':
+                value: courier_store_pickup
+        store_pickup_name:
+          '#type': textfield
+          '#title': 'Name the order is held under'
+          '#description': 'Only needed if it differs from the name on this request.'
+        order_is_paid_and_ready:
+          '#type': checkbox
+          '#title': 'The order is already paid for and ready to collect'
+          '#description': 'Our driver collects only. They cannot pay for the order, wait for it to be prepared, or place it.'
+          '#states':
+            required:
+              ':input[name="service_type"]':
+                value: courier
+              ':input[name="delivery_mode"]':
+                value: courier_store_pickup
+      courier_urgency:
+        '#type': radios
+        '#title': 'How soon do you need it there?'
+        '#options':
+          standard: Standard
+          rush: Rush
+          expedited: Expedited
+        '#default_value': standard
+        '#access_create_roles': {  }
+      prohibited_items_ack:
+        '#type': radios
+        '#title': 'Does the package contain anything restricted?'
+        '#options':
+          none: 'No — no cash, weapons, hazardous, perishable, live, or illegal contents'
+          restricted: 'Yes, one or more of those'
+          unsure: 'I am not sure'
+        '#description': 'We cannot carry cash, weapons, hazardous or flammable materials, live animals, perishable goods, or anything illegal. Say so here and staff will review the request instead of booking it online.'
+        '#access_create_roles': {  }
+  page_2:
+    '#type': webform_wizard_page
+    '#title': '2. Package & Quote'
+    '#description': 'When you need it, and anything you would like added.'
+    '#wizard_progress_bar': true
+    '#wizard_progress_percentage': true
+    shipment_measurements:
+      '#type': fieldset
+      '#title': 'Weight and Dimensions'
+      '#description': 'Optional structured measurements improve estimate accuracy. The system may use dimensional weight when it is greater than actual weight.'
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            '!value': courier
+      item_quantity:
+        '#type': number
+        '#title': 'Number of identical items or packages'
+        '#min': 1
+        '#default_value': 1
+        '#states':
+          visible:
+            ':input[name="service_type"]':
+              '!value': courier
+      item_length:
+        '#type': number
+        '#title': Length
+        '#min': 0
+        '#step': 0.01
+        '#states':
+          visible:
+            ':input[name="service_type"]':
+              '!value': courier
+      item_width:
+        '#type': number
+        '#title': Width
+        '#min': 0
+        '#step': 0.01
+        '#states':
+          visible:
+            ':input[name="service_type"]':
+              '!value': courier
+      item_height:
+        '#type': number
+        '#title': Height
+        '#min': 0
+        '#step': 0.01
+        '#states':
+          visible:
+            ':input[name="service_type"]':
+              '!value': courier
+      dimension_unit:
+        '#type': select
+        '#title': 'Dimension unit'
+        '#options':
+          in: Inches
+          cm: Centimeters
+        '#default_value': in
+        '#states':
+          visible:
+            ':input[name="service_type"]':
+              '!value': courier
+    local_residential_move_details:
+      '#type': fieldset
+      '#title': 'Local Residential Move Details'
+      '#description': 'The preliminary estimate uses the selected move size, route distance, access conditions, and add-ons. Current configured rates appear in the estimate breakdown.'
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: local_residential_move
+      '#collapsible': true
+      '#collapsed': false
+      move_size_residential:
+        '#type': select
+        '#title': 'Move Size'
+        '#options':
+          studio: 'Studio Apartment'
+          1_br: '1 Bedroom Home/Apt'
+          2_br: '2 Bedroom Home/Apt'
+          3_br: '3 Bedroom Home/Apt'
+          4_br_plus: '4+ Bedroom Home/Apt'
+          few_items: 'Just a few items'
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: local_residential_move
+      origin_access_conditions:
+        '#type': select
+        '#title': 'Origin Access Conditions'
+        '#description': 'Select the actual access condition so any configured access charge can be included.'
+        '#options':
+          ground_floor: 'Ground floor / No stairs'
+          stairs: 'Stairs (Walk-up)'
+          passenger_elevator: 'Passenger Elevator'
+          freight_elevator: 'Freight Elevator'
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: local_residential_move
+      origin_stairs_flights:
+        '#type': number
+        '#title': 'Number of flights of stairs'
+        '#min': 1
+        '#states':
+          visible:
+            ':input[name="origin_access_conditions"]':
+              value: stairs
+          required:
+            ':input[name="origin_access_conditions"]':
+              value: stairs
+      destination_access_conditions:
+        '#type': select
+        '#title': 'Destination Access Conditions'
+        '#description': 'Select the actual access condition so any configured access charge can be included.'
+        '#options':
+          ground_floor: 'Ground floor / No stairs'
+          stairs: 'Stairs (Walk-up)'
+          passenger_elevator: 'Passenger Elevator'
+          freight_elevator: 'Freight Elevator'
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: local_residential_move
+      destination_stairs_flights:
+        '#type': number
+        '#title': 'Number of flights of stairs'
+        '#min': 1
+        '#states':
+          visible:
+            ':input[name="destination_access_conditions"]':
+              value: stairs
+          required:
+            ':input[name="destination_access_conditions"]':
+              value: stairs
+      parking_situation:
+        '#type': select
+        '#title': 'Parking Situation at Both Locations'
+        '#description': 'Long-carry or shuttle charges may apply when the truck cannot park near the entrance.'
+        '#options':
+          close: 'Truck can park close to the entrance'
+          long_carry: 'Long carry required (> 50 feet)'
+          shuttle: 'Shuttle service may be needed'
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: local_residential_move
+      specialty_items_residential:
+        '#type': radios
+        '#title': 'Do you have any specialty items to move?'
+        '#description': 'e.g., Piano, antiques, gun safe, heavy furniture > 300 lbs, artwork'
+        '#options':
+          'No': 'No'
+          'Yes': 'Yes'
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: local_residential_move
+      specialty_items_residential_description:
+        '#type': textarea
+        '#title': 'Please list and describe your specialty items'
+        '#states':
+          visible:
+            ':input[name="specialty_items_residential"]':
+              value: 'Yes'
+          required:
+            ':input[name="specialty_items_residential"]':
+              value: 'Yes'
+    local_commercial_move_details:
+      '#type': fieldset
+      '#title': 'Local Commercial/Office Move Details'
+      '#description': 'The preliminary estimate uses the configured commercial base, timing, distance, and selected services. Detailed scope and building requirements are reviewed by a moving specialist.'
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: local_commercial_move
+      '#collapsible': true
+      '#collapsed': false
+      scope_of_move:
+        '#type': textarea
+        '#title': 'Scope of Move'
+        '#description': 'Please describe the move (e.g., number of offices/workstations, heavy items like copiers, etc.)'
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: local_commercial_move
+      building_requirements:
+        '#type': checkboxes
+        '#title': 'Building Requirements'
+        '#options':
+          coi: 'Certificate of Insurance (COI) required'
+          loading_dock: 'Loading dock access required'
+          elevator_rules: 'Specific elevator hours/rules'
+      timing_of_move:
+        '#type': radios
+        '#title': 'Timing of Move'
+        '#options':
+          business_hours: 'During business hours (weekday)'
+          after_hours: 'After-hours (evening/overnight)'
+          weekend: 'Weekend (Saturday/Sunday)'
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: local_commercial_move
+      additional_services_commercial:
+        '#type': checkboxes
+        '#title': 'Additional Services Needed'
+        '#options':
+          packing_unpacking: 'Full packing/unpacking'
+          it_services: 'IT services (computer/server disconnect and reconnect)'
+          furniture_assembly: 'Modular furniture disassembly/reassembly'
+    long_distance_move_details:
+      '#type': fieldset
+      '#title': 'Long-Distance Move Details'
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: long_distance_move
+      '#collapsible': true
+      '#collapsed': false
+      pricing_info_long_distance:
+        '#type': help
+        '#helptext': '<strong>Pricing note:</strong> The preliminary estimate uses shipment weight, home-size weight floors, dimensions, route distance, access conditions, and add-ons. Current configured charges appear in the estimate breakdown.'
+      shipment_weight:
+        '#type': number
+        '#title': 'Estimated shipment weight'
+        '#min': 0
+        '#step': 1
+        '#description': 'Enter approximate shipment weight. Used for tiered pricing (optional for initial estimate).'
+        '#required': false
+      shipment_weight_unit:
+        '#type': select
+        '#title': 'Weight unit'
+        '#options':
+          kg: Kilograms
+          lb: Pounds
+        '#default_value': kg
+      shipment_size:
+        '#type': radios
+        '#title': 'Estimated Shipment Size'
+        '#options':
+          home_size: 'Select home size'
+          inventory_list: 'Provide a detailed inventory list'
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: long_distance_move
+      shipment_home_size:
+        '#type': select
+        '#title': 'Home Size'
+        '#options':
+          studio: Studio
+          1_br: '1 Bedroom'
+          2_br: '2 Bedrooms'
+          3_br: '3 Bedrooms'
+          4_br_plus: '4+ Bedrooms'
+        '#states':
+          visible:
+            ':input[name="shipment_size"]':
+              value: home_size
+          required:
+            ':input[name="service_type"]':
+              value: long_distance_move
+            ':input[name="shipment_size"]':
+              value: home_size
+      inventory_list_detail_markup:
+        '#type': webform_markup
+        '#markup': |
+          <p>Please provide a detailed inventory. You can list items by room or category.</p>
+          <p>Example:</p>
+          <ul>
+            <li><strong>Living Room:</strong> 1 Sofa, 2 Armchairs, 1 Coffee Table, 5 Boxes (books)</li>
+            <li><strong>Bedroom 1:</strong> 1 Queen Bed, 2 Nightstands, 1 Dresser, 10 Boxes (clothes)</li>
+          </ul>
+        '#states':
+          visible:
+            ':input[name="shipment_size"]':
+              value: inventory_list
+      inventory_list_textarea:
+        '#type': textarea
+        '#title': 'Your Detailed Inventory'
+        '#description': 'Please be as specific as possible to help us provide an accurate quote (optional but recommended).'
+        '#states':
+          visible:
+            ':input[name="shipment_size"]':
+              value: inventory_list
+        '#required': false
+      specialty_items_long_distance:
+        '#type': textarea
+        '#title': 'Specialty Items to Move?'
+        '#description': 'Please list any specialty items like a piano, fine art, or vehicle (optional).'
+        '#required': false
+    specialty_item_move_details:
+      '#type': fieldset
+      '#title': 'Specialty Item Move Details'
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: specialty_item_move
+      '#collapsible': true
+      '#collapsed': false
+      pricing_info_specialty:
+        '#type': help
+        '#helptext': 'A configured starting amount is shown for the selected item. Specialty moves always require review of item specifications, access, equipment, and route conditions.'
+      item_to_be_moved:
+        '#type': select
+        '#title': 'Item to be Moved'
+        '#options':
+          piano: 'Upright or grand piano'
+          gun_safe: 'Gun safe (heavy or secure item)'
+          fine_art: 'Fine art or sculpture (fragile or crated)'
+          gym_equipment: 'Heavy gym equipment'
+          other: 'Other large single item'
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: specialty_item_move
+      item_specifications:
+        '#type': textarea
+        '#title': 'Item Specifications'
+        '#description': 'Please provide details like type (e.g., Upright Piano vs. Grand Piano), estimated weight, and dimensions.'
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: specialty_item_move
+      access_obstacles:
+        '#type': textarea
+        '#title': 'Access & Obstacles'
+        '#description': 'Please describe any narrow staircases, tight corners, or multi-story challenges at either location.'
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: specialty_item_move
+    diy_truck_rental_details:
+      '#type': fieldset
+      '#title': 'DIY Truck Rental Details'
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: diy_truck_rental
+      '#collapsible': true
+      '#collapsed': false
+      truck_size:
+        '#type': select
+        '#title': 'Truck Size Needed'
+        '#options':
+          10_ft: "10' Truck (Studio/1BR)"
+          15_ft: "15' Truck (1-2 BR)"
+          20_ft: "20' Truck (2-3 BR)"
+          26_ft: "26' Truck (4+ BR)"
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: diy_truck_rental
+      rental_duration:
+        '#type': number
+        '#title': 'Number of days needed'
+        '#min': 1
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: diy_truck_rental
+      estimated_mileage:
+        '#type': number
+        '#title': 'Estimated total mileage'
+        '#required': false
+      diy_addons:
+        '#type': checkboxes
+        '#title': 'Additional Needs'
+        '#options':
+          insurance: 'Insurance / Damage Waiver'
+          dolly: 'Appliance/Utility Dolly'
+          pads: 'Furniture Pads'
+          labor_help: 'Labor Only Help (for loading/unloading)'
+      labor_help_description:
+        '#type': help
+        '#helptext': 'The preliminary estimate includes the configured two-hour labor-help minimum. Additional labor time requires manual review.'
+        '#states':
+          visible:
+            ':input[name="diy_addons[labor_help]"]':
+              checked: true
+    on_demand_delivery_details:
+      '#type': fieldset
+      '#title': 'On-Demand / Small Delivery Details'
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: on_demand_delivery
+      '#collapsible': true
+      '#collapsed': false
+      items_to_move_sameday:
+        '#type': textarea
+        '#title': 'What are you moving?'
+        '#description': 'e.g., Package, 3 boxes, single sofa, etc.'
+        '#states':
+          required:
+            ':input[name="service_type"]':
+              value: on_demand_delivery
+      service_speed:
+        '#type': radios
+        '#title': 'Service Speed'
+        '#options':
+          standard: 'Standard (same-day)'
+          rush: 'Rush (within 2–4 hours)'
+          expedited: 'Expedited (within 1 hour)'
+        '#default_value': standard
+      vehicle_helper_needs:
+        '#type': select
+        '#title': 'Vehicle & Helper Needs'
+        '#options':
+          van_1_helper: 'Van with 1 helper'
+          truck_1_helper: 'Truck with 1 helper'
+          truck_2_helpers: 'Truck with 2 helpers'
+    preferred_service_date:
+      '#type': date
+      '#title': 'Preferred Service Date'
+      '#description': 'Select a date to see available pickup times.'
+      '#date_date_min': today
+      '#date_date_max': '+12 months'
+      '#required': true
+    preferred_service_time:
+      '#type': select
+      '#title': 'Preferred Service Time'
+      '#description': '<p>Choose a preferred arrival time. Availability is confirmed after review.</p>'
+      '#options':
+        '09:00': '9:00 AM'
+        '10:00': '10:00 AM'
+        '11:00': '11:00 AM'
+        '12:00': '12:00 PM'
+        '13:00': '1:00 PM'
+        '14:00': '2:00 PM'
+        '15:00': '3:00 PM'
+        '16:00': '4:00 PM'
+        '17:00': '5:00 PM'
+      '#access_create_roles': {  }
+    date_flexibility:
+      '#type': radios
+      '#title': 'How flexible are you with your preferred move date?'
+      '#options':
+        not_flexible: 'Not flexible at all (date is fixed)'
+        plus_minus_few_days: 'Flexible +/- a few days'
+        very_flexible: 'Very flexible (within the month)'
+      '#description': 'Greater flexibility can sometimes lead to better availability or rates.'
+      '#access_create_roles': {  }
+    additional_services_fieldset:
+      '#type': fieldset
+      '#title': 'Optional Add-on Services'
+      '#description': 'You can add these services to any move type.'
+      '#collapsible': true
+      '#collapsed': false
+      packing_services:
+        '#type': checkbox
+        '#title': 'Add Professional Packing Services'
+        '#description': 'Adds the currently configured preliminary packing charge. Materials and unusual packing requirements may be reviewed separately.'
+      cleaning_services:
+        '#type': checkbox
+        '#title': 'Add Move-In / Move-Out Cleaning'
+        '#description': 'Adds the currently configured preliminary cleaning charge. Final pricing depends on the space and condition.'
+      disposal_donation_interest:
+        '#type': checkbox
+        '#title': 'Interested in disposal or donation services for unwanted items?'
+        '#description': 'We can help arrange removal or donation of items you no longer need. Additional charges may apply.'
+      '#states':
+        visible:
+          - ':input[name="service_type"]':
+              '!value': courier
+    items_for_disposal_donation:
+      '#type': textarea
+      '#title': 'Please list items for disposal/donation'
+      '#description': 'e.g., Old sofa, broken TV, bags of clothes for charity (optional).'
+      '#states':
+        visible:
+          ':input[name="disposal_donation_interest"]':
+            checked: true
+        required:
+          ':input[name="disposal_donation_interest"]':
+            checked: true
+    virtual_walkthrough_option:
+      '#type': radios
+      '#title': 'Would you like to schedule a free virtual walkthrough/video call?'
+      '#description': 'A virtual walkthrough can help us provide a more accurate quote for complex moves.'
+      '#options':
+        'No': "No, I'm okay with the initial quote."
+        'Yes': "Yes, I'd like to schedule a virtual walkthrough."
+      '#states':
+        visible:
+          - ':input[name="service_type"]':
+              '!value': courier
+    virtual_walkthrough_details:
+      '#type': fieldset
+      '#title': 'Virtual Walkthrough Details'
+      '#states':
+        visible:
+          ':input[name="virtual_walkthrough_option"]':
+            value: 'Yes'
+      preferred_video_platform:
+        '#type': checkboxes
+        '#title': 'Preferred Video Call Platform(s)'
+        '#options':
+          zoom: Zoom
+          google_meet: 'Google Meet'
+          facetime: 'FaceTime (iOS only)'
+          other_platform: 'Other (please specify below)'
+      other_platform_specify:
+        '#type': textfield
+        '#title': 'Please specify other platform'
+        '#states':
+          visible:
+            ':input[name="preferred_video_platform[other_platform]"]':
+              checked: true
+      virtual_walkthrough_availability:
+        '#type': textarea
+        '#title': 'Your Availability for Virtual Walkthrough'
+        '#description': 'Please suggest a few dates and times that work for you (e.g., Mon, Jul 29, 2025 afternoon; Wed, Jul 31, 2025 any time).'
+        '#states':
+          required:
+            ':input[name="virtual_walkthrough_option"]':
+              value: 'Yes'
+    insurance_options_fieldset:
+      '#type': fieldset
+      '#title': 'Understanding Your Moving Protection'
+      '#description': 'Available protection and valuation options depend on the service and applicable terms. A moving specialist will confirm included protection, exclusions, and any optional coverage before booking.'
+      '#collapsible': true
+      '#collapsed': false
+      '#states':
+        visible:
+          - ':input[name="service_type"]':
+              '!value': courier
+    insurance_interest:
+      '#type': radios
+      '#title': 'Are you interested in additional moving protection?'
+      '#options':
+        basic_liability: 'No, the standard included protection is sufficient.'
+        full_value_protection: "Yes, I'm interested in Full Value Protection."
+        learn_more: "Yes, I'd like to learn more about my options."
+      '#states':
+        visible:
+          - ':input[name="service_type"]':
+              '!value': courier
+    insurance_questions:
+      '#type': textarea
+      '#title': 'Any specific questions about insurance?'
+      '#states':
+        visible:
+          ':input[name="insurance_interest"]':
+            value: learn_more
+      '#required': false
+    moving_tips:
+      '#type': webform_markup
+      '#markup': |
+        <details>
+          <summary>Moving Tips & Resources</summary>
+          <ul>
+            <li>Get at least 3 quotes from different movers to compare prices and services.</li>
+            <li>Verify the mover's license and insurance via the FMCSA website (<a href="https://www.fmcsa.dot.gov/">fmcsa.dot.gov</a>).</li>
+            <li>Provide a detailed inventory to avoid hidden fees—use photos or videos for accuracy.</li>
+            <li>Watch for red flags like large upfront deposits or no in-person estimates.</li>
+            <li>Plan ahead: Book early, especially for peak seasons, and read contracts carefully.</li>
+            <li>To avoid spam, consider using a secondary email for quotes.</li>
+          </ul>
+        </details>
+      '#collapsible': true
+      '#collapsed': true
+      '#states':
+        visible:
+          - ':input[name="service_type"]':
+              '!value': courier
+    dispatch_slot:
+      '#type': hidden
+      '#title': 'Selected pickup arrival'
+    quote_preview:
+      '#type': webform_markup
+      '#markup': '<div class="shipping-quote-preview" data-custom-quote-preview aria-live="polite"><p>Enter both addresses and shipment details to calculate a preliminary estimate.</p></div>'
+  page_3:
+    '#type': webform_wizard_page
+    '#title': '3. Contact & Handoff'
+    '#wizard_progress_bar': true
+    '#wizard_progress_percentage': true
+    '#description': 'Last step. Where the estimate and confirmation should go.'
+    contact_information:
+      '#type': fieldset
+      '#title': 'Your Contact Information'
+      contact_row:
+        '#type': webform_flexbox
+        '#attributes':
+          class:
+            - custom-courier-row
+            - custom-courier-row--contact
+        full_name:
+          '#type': textfield
+          '#title': 'Full Name'
+          '#required': true
+          '#attributes':
+            aria-required: true
+          '#flex': 1
+        phone_number:
+          '#type': tel
+          '#title': 'Phone Number'
+          '#required': true
+          '#attributes':
+            aria-required: true
+          '#description': 'Enter a 10-digit US phone number. Spaces, parentheses, periods, and hyphens are allowed.'
+          '#pattern': '(?:\+?1[ .\-]?)?(?:\([0-9]{3}\)|[0-9]{3})[ .\-]?[0-9]{3}[ .\-]?[0-9]{4}'
+          '#pattern_error': 'Enter a valid 10-digit US phone number.'
+          '#flex': 1
+        email:
+          '#type': email
+          '#title': 'Email Address'
+          '#description': 'We will send your quote and confirmation to this address.'
+          '#required': true
+          '#attributes':
+            aria-required: true
+          '#flex': 1
+      how_did_you_hear:
+        '#type': select
+        '#title': 'How did you hear about us?'
+        '#options':
+          '': '- Select One -'
+          google: 'Google Search'
+          social_media: 'Social Media'
+          referral: Referral
+          yelp: Yelp
+          other: Other
+        '#description': 'Helps us understand our customers better!'
+    pickup_same_as_sender:
+      '#type': checkbox
+      '#title': 'Pickup contact is the same as sender'
+      '#description': 'Leave this checked if we should call you at pickup. Uncheck it to name someone else.'
+      '#default_value': true
+      '#attributes':
+        class:
+          - custom-courier-same-as-sender
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: courier
+          ':input[name="delivery_mode"]':
+            value: courier_send
+    pickup_contact_row:
+      '#type': webform_flexbox
+      '#attributes':
+        class:
+          - custom-courier-row
+          - custom-courier-row--pickup
+      pickup_contact_name:
+        '#type': textfield
+        '#title': 'Pickup contact name'
+        '#states':
+          visible:
+            ':input[name="service_type"]':
+              value: courier
+            ':input[name="delivery_mode"]':
+              '!value': courier_store_pickup
+            ':input[name="pickup_same_as_sender"]':
+              unchecked: true
+          required:
+            ':input[name="service_type"]':
+              value: courier
+            ':input[name="delivery_mode"]':
+              '!value': courier_store_pickup
+            ':input[name="pickup_same_as_sender"]':
+              unchecked: true
+        '#states_clear': false
+        '#flex': 1
+      pickup_contact_phone:
+        '#type': tel
+        '#title': 'Pickup contact phone'
+        '#pattern': '(?:\+?1[ .\-]?)?(?:\([0-9]{3}\)|[0-9]{3})[ .\-]?[0-9]{3}[ .\-]?[0-9]{4}'
+        '#pattern_error': 'Enter a valid 10-digit US phone number.'
+        '#states':
+          visible:
+            ':input[name="service_type"]':
+              value: courier
+            ':input[name="delivery_mode"]':
+              '!value': courier_store_pickup
+            ':input[name="pickup_same_as_sender"]':
+              unchecked: true
+          required:
+            ':input[name="service_type"]':
+              value: courier
+            ':input[name="delivery_mode"]':
+              '!value': courier_store_pickup
+            ':input[name="pickup_same_as_sender"]':
+              unchecked: true
+        '#states_clear': false
+        '#flex': 1
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: courier
+      '#states_clear': false
+    pickup_instructions:
+      '#type': textarea
+      '#title': 'Pickup instructions'
+      '#rows': 2
+      '#description': 'Buzzer, unit number, gate code, or where to wait. Optional.'
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: courier
+    delivery_contact_row:
+      '#type': webform_flexbox
+      '#attributes':
+        class:
+          - custom-courier-row
+          - custom-courier-row--delivery
+      delivery_contact_name:
+        '#type': textfield
+        '#title': 'Delivery contact name'
+        '#states':
+          visible:
+            ':input[name="service_type"]':
+              value: courier
+          required:
+            ':input[name="service_type"]':
+              value: courier
+        '#flex': 1
+      delivery_contact_phone:
+        '#type': tel
+        '#title': 'Delivery contact phone'
+        '#pattern': '(?:\+?1[ .\-]?)?(?:\([0-9]{3}\)|[0-9]{3})[ .\-]?[0-9]{3}[ .\-]?[0-9]{4}'
+        '#pattern_error': 'Enter a valid 10-digit US phone number.'
+        '#states':
+          visible:
+            ':input[name="service_type"]':
+              value: courier
+          required:
+            ':input[name="service_type"]':
+              value: courier
+        '#flex': 1
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: courier
+    delivery_instructions:
+      '#type': textarea
+      '#title': 'Delivery instructions'
+      '#rows': 2
+      '#description': 'Buzzer, unit number, gate code, or where to leave it. Optional.'
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: courier
+    handoff_preference:
+      '#type': radios
+      '#title': 'How should the driver hand it over?'
+      '#options':
+        in_person: 'In person, signature on delivery'
+        leave_at_door: 'Leave at the door if nobody answers'
+        reception: 'Leave with reception or a concierge'
+      '#default_value': in_person
+      '#states':
+        visible:
+          ':input[name="service_type"]':
+            value: courier
+        required:
+          ':input[name="service_type"]':
+            value: courier
+    universal_item_file:
+      '#type': file
+      '#title': 'Upload a photo or video of the package, item(s), or access conditions (optional)'
+      '#description': 'A photo of the package helps us confirm it is a one-person carry, and photos of difficult access points improve any estimate. Maximum file size: 20 MB. Accepted file types: JPG, PNG, GIF, MP4, MOV, and WEBM.'
+      '#file_extensions': 'jpg png gif mp4 mov webm'
+      '#max_filesize': 20M
+      '#max_files': 5
+      '#file_display': picture
+      '#uri_scheme': private
+    quote_information:
+      '#type': details
+      '#title': 'Important information regarding your quote'
+      '#open': false
+      '#attributes':
+        class:
+          - custom-courier-quote-info
+      quote_disclaimer:
+        '#type': webform_markup
+        '#markup': |
+          <p>The information provided through this form helps us generate a <strong>preliminary estimate</strong>. A final, binding quote will be provided only after a detailed review by a moving specialist.</p>
+          <p>Factors like unexpected access challenges, additional items, or last-minute changes can affect the final cost.</p>
+          <p>No obligation – get your free quote today!</p>
+    disclaimer:
+      '#type': webform_markup
+      '#markup': '<p class="disclaimer">This is a preliminary, non-binding estimate based on the information provided. Final pricing may change after review of access, inventory, dimensions, weight, special handling, staffing, and other service conditions. <a href="/privacy-policy">Privacy Policy</a>.</p>'
+    data_consent:
+      '#type': checkbox
+      '#title': 'I consent to the use of my data for providing a quote and related communications, in accordance with the <a href="/privacy-policy">Privacy Policy</a>.'
+      '#required': true
+      '#description': 'Your information will be used to prepare and communicate your quote as described in the Privacy Policy.'
+    dispatch_hold_marker:
+      '#type': hidden
+      '#title': 'Dispatch hold marker'
+      '#access_view_roles': {  }
+    final_calculated_quote:
+      '#type': hidden
+      '#title': 'Estimated Quote'
+      '#value': ''
+    estimated_quote_currency:
+      '#type': hidden
+      '#title': 'Quote currency'
+    estimated_quote_status:
+      '#type': hidden
+      '#title': 'Quote status'
+    estimated_quote_breakdown:
+      '#type': hidden
+      '#title': 'Quote breakdown'
+    estimated_quote_rate_version:
+      '#type': hidden
+      '#title': 'Quote rate version'
+  reservation_hold_token:
+    '#type': hidden
+    '#title': 'Reservation hold token'
+    '#default_value': ''
+    '#access_view_roles': {  }
+css: ''
+javascript: ''
+settings:
+  ajax: false
+  ajax_scroll_top: form
+  ajax_progress_type: ''
+  ajax_effect: ''
+  ajax_speed: null
+  page: true
+  page_submit_path: ''
+  page_confirm_path: ''
+  page_theme_name: ''
+  form_title: both
+  form_submit_once: false
+  form_open_message: ''
+  form_close_message: ''
+  form_exception_message: ''
+  form_previous_submissions: true
+  form_confidential: false
+  form_confidential_message: ''
+  form_disable_remote_addr: false
+  form_convert_anonymous: false
+  form_prepopulate: false
+  form_prepopulate_source_entity: false
+  form_prepopulate_source_entity_required: false
+  form_prepopulate_source_entity_type: ''
+  form_unsaved: false
+  form_disable_back: false
+  form_submit_back: false
+  form_disable_autocomplete: false
+  form_novalidate: false
+  form_disable_inline_errors: false
+  form_required: false
+  form_autofocus: false
+  form_details_toggle: false
+  form_reset: false
+  form_access_denied: default
+  form_access_denied_title: ''
+  form_access_denied_message: ''
+  form_access_denied_attributes: {  }
+  form_file_limit: ''
+  form_file_limit_message: ''
+  form_attributes: {  }
+  form_method: ''
+  form_action: ''
+  share: false
+  share_node: false
+  share_theme_name: ''
+  share_title: true
+  share_page_body_attributes: {  }
+  submission_label: ''
+  submission_exception_message: ''
+  submission_locked_message: ''
+  submission_log: false
+  submission_excluded_elements: {  }
+  submission_exclude_empty: false
+  submission_exclude_empty_checkbox: false
+  submission_views: {  }
+  submission_views_replace: {  }
+  submission_user_columns: {  }
+  submission_user_duplicate: false
+  submission_access_denied: default
+  submission_access_denied_title: ''
+  submission_access_denied_message: ''
+  submission_access_denied_attributes: {  }
+  previous_submission_message: ''
+  previous_submissions_message: ''
+  autofill: false
+  autofill_message: ''
+  autofill_excluded_elements: {  }
+  wizard_progress_bar: true
+  wizard_progress_pages: false
+  wizard_progress_percentage: false
+  wizard_progress_link: false
+  wizard_progress_states: false
+  wizard_start_label: ''
+  wizard_preview_link: false
+  wizard_confirmation: true
+  wizard_confirmation_label: ''
+  wizard_auto_forward: true
+  wizard_auto_forward_hide_next_button: false
+  wizard_keyboard: true
+  wizard_track: ''
+  wizard_prev_button_label: ''
+  wizard_next_button_label: ''
+  wizard_toggle: false
+  wizard_toggle_show_label: ''
+  wizard_toggle_hide_label: ''
+  wizard_page_type: container
+  wizard_page_title_tag: h2
+  preview: 0
+  preview_label: ''
+  preview_title: ''
+  preview_message: ''
+  preview_attributes: {  }
+  preview_excluded_elements: {  }
+  preview_exclude_empty: true
+  preview_exclude_empty_checkbox: false
+  draft: none
+  draft_multiple: false
+  draft_auto_save: false
+  draft_saved_message: ''
+  draft_loaded_message: ''
+  draft_pending_single_message: ''
+  draft_pending_multiple_message: ''
+  confirmation_type: page
+  confirmation_url: ''
+  confirmation_title: ''
+  confirmation_message: ''
+  confirmation_attributes: {  }
+  confirmation_back: true
+  confirmation_back_label: ''
+  confirmation_back_attributes: {  }
+  confirmation_exclude_query: false
+  confirmation_exclude_token: false
+  confirmation_update: false
+  limit_total: null
+  limit_total_interval: null
+  limit_total_message: ''
+  limit_total_unique: false
+  limit_user: null
+  limit_user_interval: null
+  limit_user_message: ''
+  limit_user_unique: false
+  entity_limit_total: null
+  entity_limit_total_interval: null
+  entity_limit_user: null
+  entity_limit_user_interval: null
+  purge: none
+  purge_days: null
+  results_disabled: false
+  results_disabled_ignore: false
+  results_customize: false
+  token_view: false
+  token_update: false
+  token_delete: false
+  serial_disabled: false
+access:
+  create:
+    roles:
+      - anonymous
+      - authenticated
+    users: {  }
+    permissions: {  }
+  view_any:
+    roles: {  }
+    users: {  }
+    permissions: {  }
+  update_any:
+    roles: {  }
+    users: {  }
+    permissions: {  }
+  delete_any:
+    roles: {  }
+    users: {  }
+    permissions: {  }
+  purge_any:
+    roles: {  }
+    users: {  }
+    permissions: {  }
+  view_own:
+    roles: {  }
+    users: {  }
+    permissions: {  }
+  update_own:
+    roles: {  }
+    users: {  }
+    permissions: {  }
+  delete_own:
+    roles: {  }
+    users: {  }
+    permissions: {  }
+  administer:
+    roles: {  }
+    users: {  }
+    permissions: {  }
+  test:
+    roles: {  }
+    users: {  }
+    permissions: {  }
+  configuration:
+    roles: {  }
+    users: {  }
+    permissions: {  }
+handlers:
+  address_and_distance_calculator:
+    id: address_distance_handler
+    handler_id: address_and_distance_calculator
+    label: 'Address and Distance Calculator'
+    notes: ''
+    status: true
+    conditions: {  }
+    weight: 0
+    settings:
+      origin_address_field: origin_address
+      destination_address_field: destination_address
+      distance_field: calculated_distance
+      distance_meters_field: calculated_distance_meters
+      quote_total_field: final_calculated_quote
+      quote_currency_field: estimated_quote_currency
+      quote_breakdown_field: estimated_quote_breakdown
+      quote_status_field: estimated_quote_status
+      quote_rate_version_field: estimated_quote_rate_version
+      reservation_enabled: false
+      reservation_date_field: preferred_service_date
+      reservation_time_field: preferred_service_time
+      reservation_hold_token_field: reservation_hold_token
+      reservation_resource_field: ''
+      reservation_timezone: America/New_York
+      reservation_duration_minutes: 60
+      reservation_hold_seconds: 600
+      reservation_booking_window_days: 90
+      reservation_allowed_weekdays:
+        - 1
+        - 2
+        - 3
+        - 4
+        - 5
+        - 6
+      dispatch_enabled: true
+      dispatch_slot_field: dispatch_slot
+      dispatch_hold_token_field: dispatch_hold_marker
+variants: {  }

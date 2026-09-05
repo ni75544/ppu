@@ -112,8 +112,10 @@ request_fields:
   store_pickup_paid_and_ready: order_is_paid_and_ready
 
 resource:
-  # The first production Resource. Capacity one per Resource and Slot.
-  id: driver-01-vehicle-01
+  # The first production Resource. Capacity one per Resource and Slot. This ID is
+  # the identity every Slot, Hold and Reservation row is written against, so it is a
+  # portable required value, not a cosmetic label: renaming it orphans the ledger.
+  id: driver-01
   capacity: 1
   timezone: America/New_York
   depot_address: ''
@@ -121,39 +123,34 @@ resource:
   grid_minutes: 30
   # ISO-8601 weekday number => local HH:MM bounds. A weekday that is absent is
   # not worked, which is how a closed day is expressed.
+  #
+  # Monday only, 08:00-17:00 local. This is the verified operating window of the
+  # running Resource, not a permissive default: the browser acceptance gate that
+  # proves the Courier flow works was scored against exactly this window, so a
+  # wider shipped window would hand a fresh install a schedule no gate has ever
+  # exercised. Widening the week is an operator decision taken in the active site,
+  # not something a module install should presume.
   working_hours:
     '1':
       start: '08:00'
-      end: '18:00'
-    '2':
-      start: '08:00'
-      end: '18:00'
-    '3':
-      start: '08:00'
-      end: '18:00'
-    '4':
-      start: '08:00'
-      end: '18:00'
-    '5':
-      start: '08:00'
-      end: '18:00'
-    '6':
-      start: '09:00'
-      end: '15:00'
+      end: '17:00'
   # Local intervals inside working hours that no Dispatch Window may overlap.
-  breaks:
-    - start: '12:00'
-      end: '12:30'
+  # Empty on the running Resource: the mid-day break was a shipped default that no
+  # production Resource ever adopted.
+  breaks: {  }
   # Local Y-m-d dates on which this Resource offers nothing.
   blackout_dates: {  }
   # Padding added to Repositioning between consecutive Reservations.
-  repositioning_buffer_minutes: 20
+  repositioning_buffer_minutes: 4
   # Padding at the end of every Dispatch Window before the Resource is free.
-  operational_buffer_minutes: 15
+  operational_buffer_minutes: 4
   # How far ahead of today Slots may be offered.
   booking_horizon_days: 30
   # Whether the Resource must be able to reach the depot within working hours.
-  return_to_base: true
+  # FALSE on the running Resource. With a single Monday window and a 4-minute
+  # operational buffer, requiring a depot return inside working hours removes the
+  # last Slots of the day, which is capacity the operator has chosen to keep.
+  return_to_base: false
 
 # What each service decides about being booked, resolved through
 # BookingProfileResolverInterface. Every service the Webform offers now appears
@@ -366,9 +363,12 @@ holds:
   hold_seconds: 900
 
 durations:
-  # Fallback work time, used when a service has no more specific rule.
-  pickup_work_minutes: 15
-  delivery_work_minutes: 15
+  # Fallback work time, used when a service has no more specific rule. These are the
+  # values the running Resource is planned against; the per-service blocks below
+  # override them for every service that has its own rule, so these two only decide
+  # how a service with no rule at all is timed.
+  pickup_work_minutes: 10
+  delivery_work_minutes: 5
   # How wide an arrival promise the customer is given around pickup arrival.
   pickup_promise_minutes: 30
 
@@ -425,10 +425,27 @@ durations:
 # the planner's table cannot see each other, so two live guards on one form would be
 # two guards holding two different pictures of the same day.
 #
-# Shipped empty, and empty is the whole point. Every existing Webform stays on the
-# fixed-slot workflow it is already running, or on nothing at all, and no handler
-# checkbox can move one: the Dispatch Planner serves a form only once its ID appears
-# below. Task 5 adds the new homepage form here after its offer-only interface
-# exists, which is the same moment the planner starts taking public bookings.
+# This is an allowlist, and it is one-directional: a Webform is served by the
+# Dispatch Planner because it is named here, never because a handler checkbox is
+# ticked. Every Webform not named here stays on the fixed-slot workflow it already
+# runs, or on nothing at all.
+#
+# `hg` is the Express Courier form and is a required portable value. Shipping this
+# list empty is what made a fresh install unable to reproduce the Courier baseline:
+# the form installed, the planner refused to act for it, and the booking widget had
+# no authority to offer a Slot. Adding a second ID here transfers that form too, so
+# the list stays deliberately short.
 workflow:
-  dispatch_webforms: {  }
+  dispatch_webforms:
+    - hg
+
+# Who the confirmed-booking path may contact. This names a Webform element, never an
+# address: the value is resolved against the submission at checkout time, so no
+# customer data is stored here.
+#
+# Required portable value. DispatchCheckoutStarter::resolveContact() returns NULL
+# when this is empty, and a NULL contact refuses to open a Commerce order, so a
+# fresh install that omits it can render a Slot but can never complete a booking.
+recipients:
+  customer_email_field: email
+

@@ -25,3 +25,19 @@ dependencies:
   # config. Declared rather than optional, because the shipped view is a
   # views.view config entity that cannot be installed without it.
   - drupal:views
+  # Block carries the only route a customer has to the Express Courier form. The
+  # placement is shipped as a block.block config entity, and without this module
+  # installed there is no block.block entity type: the file would be written as an
+  # inert raw config object and the homepage would render nothing. Note that the
+  # placement also needs the Olivero theme installed, which a module dependency
+  # cannot express — see block.block.hg_express_courier_home.
+  - drupal:block
+#
+# Advanced Queue and ECA are deliberately NOT declared. Every call site checks
+# moduleExists() first (QueueDispatchNotifier, AdvancedQueueMaintenanceQueue,
+# custom_webform_handlers.install), and their configuration ships in config/optional
+# so it materialises only where those modules are present. Booking, planning and
+# checkout all work without either; the queue only changes whether notification and
+# warm-up work is deferred or skipped. Declaring them would turn a working optional
+# integration into an install-time requirement.
+

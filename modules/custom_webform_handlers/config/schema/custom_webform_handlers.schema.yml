@@ -617,6 +617,20 @@ custom_webform_handlers.dispatch:
             type: string
             label: 'Webform ID'
 
+    # Who the confirmed-booking path may contact. This is a Webform element name, not
+    # an address: nothing here stores customer data. It is declared on the dispatch
+    # object as well as on the notifications object below because two readers use it
+    # for two different decisions — the checkout starter needs a contact before it may
+    # open an order, and the notification composer needs one before it may send.
+    # Neither reads the other's copy, so neither can be dropped in favour of it.
+    recipients:
+      type: mapping
+      label: 'Contact resolution'
+      mapping:
+        customer_email_field:
+          type: string
+          label: 'Webform element holding the customer email'
+
 # Notifications are an integration around the confirmed planner state, never a source
 # of it. Nothing in this object can withhold capacity, move a Reservation, or change
 # what the calendar offers: it decides who is told about a fact that has already

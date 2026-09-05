@@ -30,10 +30,12 @@
 langcode: en
 status: true
 dependencies:
+  # What Views recalculates for this view on save. `user` was carried over from an
+  # earlier revision that used the core `perm` access plugin; the custom
+  # `dispatch_board_audience` plugin that replaced it needs nothing from the user
+  # module, and Views does not list itself.
   module:
     - custom_webform_handlers
-    - user
-    - views
 id: dispatch_reservations
 label: 'Reservation Dashboard'
 module: views

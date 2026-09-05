@@ -450,6 +450,41 @@ function custom_webform_handlers_schema(): array {
 }
 
 /**
+ * Implements hook_install().
+ *
+ * The first-install bootstrap, and deliberately not a migration.
+ *
+ * Drupal does not run a single hook_update_N on a fresh module install: it stamps the
+ * schema version at the highest one it finds and skips them all. Everything updates
+ * 10001-10039 did for the site that grew this module has to be true of a new database
+ * on the strength of hook_schema() and config/install alone — which it now is, with one
+ * exception that configuration is structurally incapable of carrying.
+ *
+ * A Commerce Store is a content entity. config/install ships the Dispatch order type,
+ * the checkout flow, the order fields and the Webform, and a site with all of them
+ * still refuses every booking, because DispatchOrderFactory asks CurrentStore which
+ * shop the order belongs to and gets NULL. Nothing else here is missing, so nothing
+ * else is created: the Advanced Queue queues arrive on their own through config/optional
+ * whichever order the two modules are installed in, and the planner tables are
+ * hook_schema()'s job.
+ *
+ * The work is done by a service so it can take Commerce's currency importer by
+ * injection, and it is idempotent: it creates a store only when there are none, and
+ * never edits one it finds. See CommerceStoreInstaller for why an existing store is
+ * left exactly as it is.
+ *
+ * Runs on a configuration sync too. $is_syncing suppresses config work, and this is
+ * not config work — a synced site imports the same packaged objects and would be left
+ * with the same missing store.
+ *
+ * @see \Drupal\custom_webform_handlers\Install\CommerceStoreInstaller
+ */
+function custom_webform_handlers_install($is_syncing): void {
+  $outcome = \Drupal::service('custom_webform_handlers.store_installer')->ensureStore();
+  \Drupal::logger('custom_webform_handlers')->info('Dispatch install completed its Commerce store bootstrap: @outcome.', ['@outcome' => $outcome]);
+}
+
+/**
  * Removes the legacy API key that was shared by browser and server requests.
  */
 function custom_webform_handlers_update_10001(): string {
@@ -4095,4 +4130,43 @@ function custom_webform_handlers_shell_date_10039(array &$elements, array &$miss
   unset($element);
 
   return $changed;
+}
+
+/**
+ * Implements hook_update_N().
+ *
+ * Reconciles an already-installed site with the handling flag the module's own
+ * code produces.
+ *
+ * `AddressDistanceHandler::…()` maps an attestation that is absent, unchecked or
+ * crafted to `unsure` before Dispatch ever sees the request, and
+ * `DispatchRequestFactory` reads `unsure` as the customer telling us something.
+ * If `unsure` is not in `manual_review.handling_flags`, that signal is dropped:
+ * the request the customer did not vouch for is read as a clean answer instead
+ * of being sent to Manual Review. The packaged baseline carries the flag; this
+ * site's stored copy predates it.
+ *
+ * Narrow on purpose. The resource schedule, capacity, buffers and the Dispatch
+ * allowlist are site-tuned values that a reconciliation hook must not overwrite,
+ * so only this one list is touched, and only by addition.
+ */
+function custom_webform_handlers_update_10040(): string {
+  $config = \Drupal::configFactory()->getEditable('custom_webform_handlers.dispatch');
+  $flags = array_values(array_unique(array_filter(array_map(
+    static fn ($flag): string => trim((string) $flag),
+    (array) $config->get('manual_review.handling_flags'),
+  ), static fn (string $flag): bool => $flag !== '')));
+
+  if (in_array('unsure', $flags, TRUE)) {
+    return (string) t('Manual Review already recognises the unsure handling flag over @count flags; nothing changed.', [
+      '@count' => count($flags),
+    ]);
+  }
+
+  $flags[] = 'unsure';
+  $config->set('manual_review.handling_flags', $flags)->save();
+
+  return (string) t('Manual Review now recognises @count handling flags including unsure, so an unattested or crafted acknowledgement is routed to review instead of being read as a clean answer.', [
+    '@count' => count($flags),
+  ]);
 }

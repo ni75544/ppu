@@ -1,0 +1,53 @@
+# How the Express Courier form reaches the public.
+#
+# The booking widget is not a page of its own: it is the `hg` Webform placed into the
+# front page's first content region. Without this placement a fresh install has a
+# working Webform, a working planner and no way for a customer to reach either — the
+# form exists at its own canonical path, but the homepage the product actually
+# advertises renders nothing.
+#
+# Three parts of this are load-bearing:
+#
+# 1. `visibility.request_path.pages: '<front>'` restricts it to the front page. The
+#    block is not sitewide; every other page keeps its own layout.
+# 2. `region: content_above` puts it before page content rather than in a sidebar,
+#    because the widget owns the fold on the page whose job is to take a booking.
+# 3. `label_display: '0'` hides the block title. The form carries its own heading, and
+#    two headings read as two forms.
+#
+# `theme: olivero` is a real install-time requirement, not a preference: Drupal
+# refuses to install a block whose theme is absent, so a site that installs this
+# module must have Olivero installed. The standard profile does.
+#
+# @see webform.webform.hg
+langcode: en
+status: true
+dependencies:
+  config:
+    - webform.webform.hg
+  module:
+    - system
+    - webform
+  theme:
+    - olivero
+id: hg_express_courier_home
+theme: olivero
+region: content_above
+weight: -20
+provider: null
+plugin: webform_block
+settings:
+  id: webform_block
+  label: 'Express Courier quote request'
+  label_display: '0'
+  provider: webform
+  webform_id: hg
+  default_data: ''
+  redirect: false
+  lazy: false
+visibility:
+  request_path:
+    id: request_path
+    negate: false
+    context_mapping: {  }
+    pages: '<front>'

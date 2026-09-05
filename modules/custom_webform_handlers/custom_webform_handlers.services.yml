@@ -598,3 +598,19 @@ services:
       - '@custom_webform_handlers.dispatch_profile_factory'
       - '@custom_webform_handlers.dispatch_route_estimator'
       - '@logger.channel.custom_webform_handlers'
+
+  # The one thing a fresh install needs that configuration cannot carry.
+  #
+  # A Commerce Store is a content entity, so config/install ships the order type, the
+  # checkout flow and the Webform and still leaves a new site unable to open an order.
+  # Called once from hook_install(). Registered as a service rather than written inline
+  # in the install file so the store rules sit with the rest of the module's classes and
+  # take Commerce's own currency importer by injection instead of reaching for it.
+  custom_webform_handlers.store_installer:
+    class: Drupal\custom_webform_handlers\Install\CommerceStoreInstaller
+    arguments:
+      - '@entity_type.manager'
+      - '@commerce_price.currency_importer'
+      - '@config.factory'
+      - '@logger.channel.custom_webform_handlers'
+
