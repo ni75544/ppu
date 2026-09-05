@@ -40,7 +40,7 @@ not add a second authority, and the checks below exist to prove none has appeare
 | # | Prerequisite | Why launch fails without it |
 | --- | --- | --- |
 | 1 | **An on-site Commerce payment gateway that supports authorize, capture, and void.** As shipped the site has **zero** payment gateways configured. | The settled-money model authorises, confirms capacity, then captures. An off-site or capture-only gateway cannot do the "authorise now, capture after confirmation" sequence, and no gateway at all means no checkout can complete. |
-| 2 | **Google Routes server key** in `settings.php` (outside config export) and a **browser key** in *Configuration → Web services → Google API Settings*. | The planner prices traffic-aware legs server-side; without the server key it can offer no Slots. See the module [README](../../modules/custom_webform_handlers/README.md#security-notice) for key separation and required Google APIs. |
+| 2 | **Google Routes server credential supplied by the environment**, read by `settings.php` through `getenv()` and therefore outside both Git and the configuration export, plus a **browser key** in *Configuration → Web services → Google API Settings*. | The planner prices traffic-aware legs server-side; with no server credential the provider throws `provider_not_configured` and the planner can offer no Slots at all. The two credentials must be different values with different restrictions. Setup, restrictions and the failure ladder are in [Appendix B](#appendix-b--the-server-routes-credential); see also the module [README](../../modules/custom_webform_handlers/README.md#security-notice) for required Google APIs. |
 | 3 | **Redis reachable** (or accepted degraded mode). | Redis backs cache/lock bins and read caches only. It is not required for capacity, payment, or the queue, but on this build it is wired into the bootstrap container — see §7. |
 | 4 | **Cron scheduled** (drains both Advanced Queue queues). | Notifications, route warming, and the popularity recount run on cron. See [dispatch-workers.md](dispatch-workers.md#how-work-normally-runs). |
 | 5 | **Contrib present and enabled:** `commerce_payment`, `commerce_checkout`, `advancedqueue`, and (optional but recommended) `eca` + its event/action providers. | The checkout flow, panes, queues, and reaction layer depend on them. |
@@ -330,7 +330,7 @@ code change as the fastest first response.
 
 ---
 
-## Appendix — verification sequence
+## Appendix A — verification sequence
 
 The project's standard post-deploy verification, with `cim` deliberately omitted
 (see §5):
@@ -343,3 +343,131 @@ ddev drush cr
 ddev drush status
 git diff --check
 ```
+
+---
+
+## Appendix B — the server Routes credential
+
+The planner needs **two** Google credentials, and they are not interchangeable:
+
+| Credential | Where it lives | Restricted by | Used for |
+| --- | --- | --- | --- |
+| **Server Routes credential** | the **process environment** of the web container / host, read by `settings.php` through `getenv()` | caller address (application restriction) + Routes API only | server-side traffic-aware leg measurement inside the planner |
+| **Browser key** | Drupal configuration, *Configuration → Web services → Google API Settings* | HTTP referrer + the browser-facing Maps/Places APIs | the address autocomplete widget on the public form |
+
+They must be **different values**. A single credential cannot satisfy both
+restriction models at once: a referrer-restricted key is refused for a
+server-to-server call, and an address-restricted key is refused for a browser
+call.
+
+### B.1 Why the server credential is environment-supplied
+
+The value is read from the environment and never written into a tracked file:
+
+- **Not Drupal configuration**, so it cannot be captured by `drush cex` and
+  cannot leak through a configuration export artifact.
+- **Not an inline literal in `settings.php`**, so rotating it on the cloud side
+  actually reaches the runtime, and no working copy carries a live credential.
+- **Never committed.** The environment file that supplies it is git-ignored.
+
+Both site variants read the same seam, so an environment-side rotation applies to
+each of them the next time PHP starts. See
+[config-reproducibility-audit.md](../architecture/config-reproducibility-audit.md)
+for the reproducibility consequence: the credential is deliberately the one
+runtime input that is *not* reproducible from versioned code, and it is supplied
+per environment instead.
+
+### B.2 Setting it up
+
+1. In the cloud console, create a credential restricted to the **Routes API**
+   only.
+2. Add an **application restriction** listing every egress address the site
+   actually leaves from. This is not always the address you expect — a split
+   tunnel, VPN, or NAT can present a different address per destination, and the
+   refusal does not disclose which address the provider was seen to use. List
+   every address you observe, and re-check after any network change.
+3. Publish the value into the web container's environment under the name the
+   `getenv()` seam in `settings.php` reads. Do not paste it into
+   `settings.php`, module configuration, or a Composer or DDEV file that is
+   tracked.
+4. Restart the containers (or the PHP process) so the new environment is read.
+5. Configure the **browser key** separately in the admin UI.
+
+### B.3 Verifying it, in this order
+
+Each step is read-only and none of them prints the value. Stop at the first
+failure; a later step cannot pass while an earlier one fails.
+
+**1. Presence.** Ask only whether the variable is set, and read the exit status —
+never the value:
+
+```bash
+ddev exec sh -lc 'test -n "${CUSTOM_WEBFORM_HANDLERS_SERVER_API_KEY:-}" && printf "PRESENT\n" || { printf "ABSENT\n"; exit 1; }'
+```
+
+`ABSENT` means the environment never reached PHP; nothing downstream can work.
+
+**2. Runtime readiness.** The status report resolves both credentials through the
+same code the planner uses:
+
+```bash
+ddev drush core:requirements --filter='title*=Google'
+```
+
+Both the server credential and the browser key should read as configured. A
+"missing server credential" verdict here with `PRESENT` above means
+`settings.php` is not reading the environment on this site.
+
+**3. A direct provider probe.** Measure one leg between two public landmarks in
+both routing modes (traffic-aware and traffic-unaware). Require **HTTP 200**, a
+`SUCCESS` status, and a non-empty distance *and* duration in each mode. This is
+the step that separates "the credential is present" from "the credential is
+accepted for this API from this address."
+
+**4. A read-only availability probe.** Ask the planner for a Slot offer on a
+future operating day derived from the Resource's own working hours (never a
+hardcoded date), with a fixture that is not a Manual Review trigger. Require an
+instant estimate, a distance, a duration, and **at least one Slot**. Compare
+whole-database row counts before and after: a read-only probe must leave every
+protected family unchanged.
+
+Only after step 4 passes is it meaningful to run the browser acceptance gate.
+
+### B.4 Classifying a failure
+
+Read the failure by its reason, not by the symptom. Every row below produces the
+same customer-visible symptom — **no Slots offered** — and each needs a different
+fix:
+
+| Reason | What it means | Fix |
+| --- | --- | --- |
+| `provider_not_configured` | the runtime resolved an empty credential | the environment variable is absent or PHP was not restarted; re-run B.3 step 1 |
+| HTTP 403, permission denied | the credential exists but is refused for this call | the application restriction does not list the address the call actually left from, or the credential is not enabled for the Routes API |
+| HTTP 400, invalid argument | the request body was rejected | the address field is geocoded, so it needs a street address; a bare coordinate pair is refused |
+| HTTP 429 | quota or rate limit | wait, then review quota; the planner widens traffic-unaware legs meanwhile |
+| HTTP 200 but an unmeasurable leg | the route could not be measured | expected for unreachable pairs — the planner offers **no** Slot rather than a zero-length drive |
+| Slots offered but priced traffic-unaware | traffic-aware measurement failed while the fallback succeeded | see §13; optionally set `routing.require_traffic_aware = true` to refuse traffic-blind legs outright |
+
+A 403 is the only row that points at the credential's restrictions rather than at
+the request or the environment.
+
+### B.5 Handling rules and the one limitation
+
+- Never `printenv` the variable, `echo` it, hash it, or copy it into a ticket,
+  a QA artifact, or a commit. Presence checks report a word and an exit status.
+- Never read the environment file's contents to "check" the value; check only
+  whether the variable is set.
+- Never introduce a second seam. One `getenv()` read in `settings.php` feeding one
+  settings key is the whole contract; a second copy is how two sites end up
+  sharing one credential and an environment-side rotation reaches neither.
+- Rotate on the cloud side, then restart PHP. No code change is involved.
+
+**Limitation.** The runtime can prove the credential is *present* and *accepted*
+(B.3 steps 1–3), and it can prove the server credential and the browser key are
+different values. It cannot prove what the credential's restrictions contain —
+that requires cloud tooling or console access. Where neither is available, record
+restriction verification as **operator-attested** and say so; do not present it as
+machine-proven.
+
+
+

@@ -510,6 +510,11 @@ never exported, copied, imported, replaced, truncated or modified.
 
 ### 11.6 The remaining condition, which is not configuration
 
+> **Superseded on 2026-09-05 by [§11.9](#119-resolution--the-environment-supplied-server-credential-2026-09-05).**
+> The condition described below has since been met. This section is kept as the
+> record of the diagnosis, including the reason classification that turned out to
+> be one step short of the cause.
+
 The availability probe — a non-persistent, read-only `offerSlots()` call with
 public landmark fixture coordinates on a future operating date derived from the
 packaged working hours, never hardcoded — returned **0 eligible slots** on the
@@ -560,6 +565,11 @@ The honest form of the verdict is therefore two-part. The reproducibility blocke
 this audit raised are closed and proven. Release attestation stays blocked on a
 credential the repository must never contain.
 
+> **The second part of this verdict was superseded on 2026-09-05.** The credential
+> was supplied by the environment, and end-to-end Courier booking is now proven on
+> the active site. See [§11.9](#119-resolution--the-environment-supplied-server-credential-2026-09-05).
+> The first part — configuration is reproducible — stands unchanged.
+
 ### 11.8 The legacy artifact, left where it is
 
 `webform.webform.da` is deliberately **not packaged**. It is referred to by 0
@@ -568,6 +578,114 @@ any dependency on it. It is equally deliberately **not deleted** from the active
 database, where it remains a legacy artifact and nothing else. It was neither
 shipped by accident nor lost by accident, which was the whole point of classifying
 it before any export was written.
+
+### 11.9 Resolution — the environment-supplied server credential (2026-09-05)
+
+The condition §11.6 left open is met. The fix was the one that section named: a
+server-authorized Routes credential **supplied by the environment**, never
+committed. Nothing about the packaged configuration changed to achieve it, which
+is the point — §11.7's first verdict was already correct and is untouched.
+
+**What changed in the runtime, and only there.** Both site variants now resolve the
+credential through a `getenv()` read in `settings.php`; neither settings file
+contains a key-shaped literal any more. The browser key remains in Drupal
+configuration and is a different value — machine-proven by an equality refusal, not
+assumed. Operational detail lives in the runbook:
+[express-courier-launch.md → Appendix B](../operations/express-courier-launch.md#appendix-b--the-server-routes-credential).
+
+**The reason classification, corrected.** §11.6 read the 403 as a referrer
+restriction. The family was right — a restriction refusal — but the operative cause
+was narrower: the credential reaching the provider was not authorized for
+server-side Routes calls from this caller's address. Two things had to be true at
+once, and only one of them was: a distinct server credential, and an application
+restriction listing every address the site actually egresses from. A refusal
+discloses neither, which is why the earlier diagnosis could get one step from the
+cause with correct evidence.
+
+**A second, unrelated failure surfaced while proving this** and is worth recording
+because it looks identical from the outside: the provider reads its address field
+as geocodable text, so a fixture posting a bare coordinate pair is rejected with
+HTTP 400 `INVALID_ARGUMENT` — a request defect, not a credential defect. The
+fixture now sends street addresses, and Phase 3 and Phase 4 ask about the same
+single route so any divergence between them is the code path, not the input.
+
+**Direct provider probe.** Side-effect-free, both routing modes, both sites:
+**HTTP 200** with a `SUCCESS` status and a non-empty distance *and* duration in
+every combination. No cache row and no error row were written.
+
+**The ≥1-slot proof, on the active site.** The same non-persistent `offerSlots()`
+probe §11.6 ran, now with street-address fixtures, on the **active** site:
+
+| Measurement | Result |
+| --- | --- |
+| Operating day | derived from the Resource's own working hours, 2 days scanned, **not hardcoded** |
+| Resource profile | capacity 1, 30-minute grid, 30-day horizon, 1 worked weekday, America/New_York |
+| Eligibility | self-bookable, service class `courier`, reason `available`, **not** Manual Review |
+| Route leg | 1.53 mi / 718 s from the Routes provider |
+| Instant estimate | present, `estimated`, $19.00, rate version `2026-08-production-v1` |
+| **Eligible slots** | **17** — first 08:00, last 16:00 local, every one aligned to the grid, all on the derived date |
+| Authoritative date control | exactly **1** enabled date element, and it is the one the packaged `request_fields.requested_date` mapping names |
+| Write discipline | 116 tables before and after, identical whole-database row total, `tables_added=0`, `changed_tables=0`, all ten protected families `+0` |
+
+Seventeen rather than the nineteen the QA site offers, because the active Resource
+works a shorter day. The schedule was not adjusted to suit the harness; the
+expectation was passed in as an input instead.
+
+**Browser acceptance, sentinel-bracketed, against the active site.** Six walks —
+three scenarios at desktop and mobile widths — each bracketed by a count-and-max
+snapshot of 25 state families, run through twice in two independent windows.
+Both windows: **66 of 66 assertions passed** (33 desktop, 33 mobile), every
+scenario green.
+
+- The offer endpoint answered `200` with 17 slots for the derived date, and the
+  sidebar estimate refreshed to match the server price.
+- **Zero console errors** in every walk, and **zero** Routes authorization
+  failures.
+- The request set per walk was limited to the session token, the distance preview
+  and the offer endpoint. No Hold, renew, release, countdown, token-API, checkout
+  or payment request appeared anywhere — the public surface still offers, and does
+  not reserve.
+- The two refusal scenarios refused: the un-attested walk was blocked at page one
+  on the attestation, and the over-limit walk was refused in words with zero slots
+  and a pending-review flag.
+
+**State invariants across the browser windows.** In the second window, all 25
+families compared clean: 0 gating families moved. Submissions, drafts,
+reservations, holds, Commerce orders and order items, payments, checkout attempts,
+review records, sessions, Advanced Queue jobs, core queue items and flood counters
+were identical before and after. The only movement was 2 advisory log rows — one
+per Manual-Review-routed offer, which the two refusal scenarios exist to produce —
+with zero error, zero authentication and zero Webform rows among them.
+
+The first window moved two families, and both were **classified rather than
+waived**, because the guardrail may not be weakened to make a run pass:
+
+| Movement | Classification | How it was proven |
+| --- | --- | --- |
+| the authentication log family fell to zero rows | **ring-buffer eviction** by dblog's own row cap | the log was standing at its configured limit; the oldest surviving row id is *above* the family's previous maximum; zero new rows of that type were written; and the row id is `AUTO_INCREMENT`, so an insert can only *raise* a count and a maximum — a fall can only be deletion |
+| core queue items fell in both count and maximum id | **claimed and drained by Drupal's cron**, which runs on ordinary page requests | a cron run is recorded inside the window with its own log rows; no queue row was created during it; and again, a falling `AUTO_INCREMENT` maximum cannot be an insert |
+
+Both are Drupal core housekeeping, neither is a business record, and the identical
+scenario at the other width moved nothing — as did its re-run, and as did all six
+walks in the second window. No clean-release claim rests on the first window.
+
+**Revised verdict.**
+
+**Configuration: REPRODUCIBLE** — unchanged from §11.7, proven at 22 assertions on
+a throwaway database.
+
+**End-to-end Courier booking: PROVEN on the active site.** The ≥1-slot condition
+passes with 17 slots, a server-priced estimate, and a green browser gate at both
+widths, without creating a submission, a Hold, a Reservation, an order, a payment,
+a checkout attempt, a review record or a queue job.
+
+**The standing limitation, unchanged by design.** The server credential is the one
+runtime input that is deliberately *not* reproducible from versioned code: a fresh
+environment offers no slots until the value is supplied to it. And what the
+credential's restrictions contain remains **operator-attested** — the runtime can
+prove the credential is present, accepted, and distinct from the browser key, but
+proving a restriction list needs cloud tooling that is not available here. That is
+recorded as an attestation, not as a machine-verified fact.
 
 
 
