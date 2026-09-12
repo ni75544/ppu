@@ -7,7 +7,7 @@
 #
 # Bump the version only when the deployed asset content changes.
 distance_calculator:
-  version: 1.1.12
+  version: 1.1.15
   css:
     component:
       css/distance_calculator.css: {}
@@ -16,6 +16,17 @@ distance_calculator:
   dependencies:
     - core/drupal
     - core/drupalSettings
+    - core/once
+
+# Address completion stays separate from distance calculation: it asks only the
+# fixed self-hosted suggestion endpoint and emits the sole committed-pair event
+# that permits the calculator to request a Google route.
+address_autocomplete:
+  version: 1.1.0
+  js:
+    js/address_autocomplete.js: {}
+  dependencies:
+    - core/drupal.autocomplete
     - core/once
 
 quote_summary_sidebar:
@@ -31,7 +42,7 @@ quote_summary_sidebar:
     - core/once
 
 route_map_preview:
-  version: 1.1.11
+  version: 1.1.12
   css:
     component:
       css/route-map-preview.css: {}
@@ -76,7 +87,7 @@ reservation_admin:
 # by the server for this specific job, and the raw Hold token is never delivered to
 # the browser at all — it stays in the session receipt the server keeps.
 dispatch_slots:
-  version: 1.1.1
+  version: 1.1.2
   css:
     component:
       css/dispatch_slots.css: {}

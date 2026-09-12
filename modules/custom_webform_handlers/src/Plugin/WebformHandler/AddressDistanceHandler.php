@@ -45,6 +45,26 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 class AddressDistanceHandler extends WebformHandlerBase {
 
   /**
+   * Fallback address-commit debounce published to the browser, milliseconds.
+   *
+   * Used when `custom_webform_handlers.settings:preview_debounce_ms` is absent,
+   * which is the case on a site whose active configuration predates that key.
+   * The behavior carries the same fallback, so a stale active configuration
+   * cannot leave the browser committing on the first event of a burst.
+   */
+  const PREVIEW_DEBOUNCE_MS = 600;
+
+  /**
+   * Bounds for a configured commit debounce, milliseconds.
+   *
+   * Clamped server-side as well as in the browser: a value out of range must not
+   * be able to remove the coalescing or strand a visitor waiting for an
+   * estimate. The browser applies the same bounds to the value it is given.
+   */
+  const PREVIEW_DEBOUNCE_MIN_MS = 100;
+  const PREVIEW_DEBOUNCE_MAX_MS = 5000;
+
+  /**
    * The pricing answers that belong in a quote calculation.
    *
    * This is the single source of truth for the allowlist. alterForm() reuses it
@@ -100,16 +120,34 @@ class AddressDistanceHandler extends WebformHandlerBase {
     'disposal_donation_interest',
   ];
 
+  /**
+   * The Google Routes provider used for customer quote calculations.
+   */
   protected DistanceProviderInterface $distanceProvider;
 
+  /**
+   * The authoritative quote calculator.
+   */
   protected QuoteCalculator $quoteCalculator;
 
+  /**
+   * The fixed-slot reservation manager.
+   */
   protected ReservationManagerInterface $reservationManager;
 
+  /**
+   * The fixed-slot reservation definition provider.
+   */
   protected ReservationDefinitionProvider $reservationDefinitionProvider;
 
+  /**
+   * The fixed-slot reservation owner resolver.
+   */
   protected ReservationOwner $reservationOwner;
 
+  /**
+   * The dispatch resource profile factory.
+   */
   protected ResourceProfileFactory $dispatchProfileFactory;
 
   /**
@@ -211,7 +249,7 @@ class AddressDistanceHandler extends WebformHandlerBase {
    */
   public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition) {
     $instance = parent::create($container, $configuration, $plugin_id, $plugin_definition);
-    $instance->distanceProvider = $container->get('custom_webform_handlers.distance_provider');
+    $instance->distanceProvider = $container->get('custom_webform_handlers.google_routes_distance_provider');
     $instance->quoteCalculator = $container->get('custom_webform_handlers.quote_calculator');
     $instance->reservationManager = $container->get('custom_webform_handlers.reservation_manager');
     $instance->reservationDefinitionProvider = $container->get('custom_webform_handlers.reservation_definition_provider');
@@ -739,7 +777,40 @@ class AddressDistanceHandler extends WebformHandlerBase {
       return;
     }
 
-    $api_key = $settings_config->get('google_maps_browser_api_key');
+    $maps_enabled = (bool) $settings_config->get('google_maps_browser_enabled');
+    $api_key = $maps_enabled
+      ? trim((string) $settings_config->get('google_maps_browser_api_key'))
+      : '';
+
+    // Address suggestions never reach Google. The self-hosted endpoint may run
+    // while the visitor types; only the committed-pair event emitted by the
+    // attached behavior is allowed to reach the paid Google Routes provider.
+    // Roles are explicit so JavaScript never guesses from field names.
+    $suggestions_url = Url::fromRoute(
+      'custom_webform_handlers.address_suggestions',
+    )->toString(TRUE);
+    $cacheability->addCacheableDependency($suggestions_url);
+    $autocomplete_attached = FALSE;
+    foreach ([
+      'origin' => $origin_field,
+      'destination' => $destination_field,
+    ] as $role => $address_field) {
+      $element = &$this->findElement($form, $address_field);
+      if ($element === NULL) {
+        continue;
+      }
+      $element['#attributes']['data-custom-address-suggestions-url'] =
+        $suggestions_url->getGeneratedUrl();
+      $element['#attributes']['data-custom-address-role'] = $role;
+      $element['#attributes']['data-custom-address-commit-delay'] =
+        $this->previewDebounceMs($settings_config);
+      $element['#attributes']['autocomplete'] = 'street-address';
+      $autocomplete_attached = TRUE;
+      unset($element);
+    }
+    if ($autocomplete_attached) {
+      $form['#attached']['library'][] = 'custom_webform_handlers/address_autocomplete';
+    }
 
     $quote_context_key = 'custom_webform_handlers:' . $webform_id;
     if ($webform_submission && $webform_submission->uuid()) {
@@ -851,15 +922,6 @@ class AddressDistanceHandler extends WebformHandlerBase {
     // endpoint with a complete Request.
     $settings['wizard_context_fields'] = $context_fields;
 
-    if (empty($api_key)) {
-      // Without a browser key there is no autocomplete and no live preview, so
-      // only the render-only sidebar is attached.
-      $form['#attached']['library'][] = 'custom_webform_handlers/quote_summary_sidebar';
-      $form['#attached']['drupalSettings']['custom_webform_handlers'] = $settings;
-      $cacheability->applyTo($form);
-      return;
-    }
-
     $preview_url = Url::fromRoute('custom_webform_handlers.distance_preview')->toString(TRUE);
     $csrf_token_url = Url::fromRoute('system.csrftoken')->toString(TRUE);
     $cacheability->addCacheableDependency($preview_url);
@@ -867,13 +929,37 @@ class AddressDistanceHandler extends WebformHandlerBase {
 
     $form['#attached']['library'][] = 'custom_webform_handlers/distance_calculator';
     $form['#attached']['library'][] = 'custom_webform_handlers/quote_summary_sidebar';
-    $form['#attached']['library'][] = 'custom_webform_handlers/route_map_preview';
     $form['#attached']['drupalSettings']['custom_webform_handlers'] = $settings + [
-      'google_maps_browser_api_key' => $api_key,
       'preview_url' => $preview_url->getGeneratedUrl(),
       'csrf_token_url' => $csrf_token_url->getGeneratedUrl(),
+      'preview_debounce_ms' => $this->previewDebounceMs($settings_config),
     ];
+    if ($api_key !== '') {
+      $form['#attached']['library'][] = 'custom_webform_handlers/route_map_preview';
+      $form['#attached']['drupalSettings']['custom_webform_handlers']['google_maps_browser_api_key'] = $api_key;
+    }
     $cacheability->applyTo($form);
+  }
+
+  /**
+   * The address-commit debounce this site publishes to the browser.
+   *
+   * A committed address pair is what buys a route request, so this delay is a
+   * cost control and not a cosmetic one: it decides how many commits a burst of
+   * focus changes can produce. It is read from configuration so a site can widen
+   * it without a code change, and clamped so it cannot be set to zero.
+   */
+  private function previewDebounceMs(ImmutableConfig $settings_config): int {
+    $configured = $settings_config->get('preview_debounce_ms');
+    $debounce = is_numeric($configured) ? (int) $configured : 0;
+    if ($debounce <= 0) {
+      $debounce = self::PREVIEW_DEBOUNCE_MS;
+    }
+
+    return max(
+      self::PREVIEW_DEBOUNCE_MIN_MS,
+      min(self::PREVIEW_DEBOUNCE_MAX_MS, $debounce),
+    );
   }
 
   /**
@@ -1269,6 +1355,7 @@ class AddressDistanceHandler extends WebformHandlerBase {
    * widget treat an undeclared service as if it were bookable.
    *
    * @return array<int, string>
+   *   The selectable and configured service machine names.
    */
   private function dispatchServiceTypes(ImmutableConfig $dispatch_config): array {
     $services = [];
@@ -1355,6 +1442,9 @@ class AddressDistanceHandler extends WebformHandlerBase {
       // checkout will later try to Hold.
       if (!$this->discardArrivalInFormState($form_state, $webform_submission)) {
         $this->assertDispatchArrivalMatchesRequestedDate($form_state, $webform_submission);
+        if ($form_state->getErrors() === []) {
+          $this->assertAcceptedDispatchQuote($form_state, $webform_submission);
+        }
       }
 
       return;
@@ -1434,6 +1524,124 @@ class AddressDistanceHandler extends WebformHandlerBase {
     if (!$this->reservationManager->verifyHold($slot, $token, $owner)) {
       $form_state->setErrorByName($time_field, $message);
     }
+  }
+
+  /**
+   * Requires the customer to accept a server-recomputed payable amount.
+   *
+   * The hidden preview is not price authority. It is used only as evidence of
+   * which server-produced figure the customer saw before submitting. The route
+   * and quote are recomputed here, before a Hold, Commerce order, or payment
+   * authorization exists. A changed amount is written back into the normal quote
+   * fields and the form is stopped once, so the customer can review and submit
+   * the revised figure. A forged preview cannot lower the price: only equality
+   * with the fresh server result permits the save to continue.
+   */
+  private function assertAcceptedDispatchQuote(FormStateInterface $form_state, WebformSubmissionInterface $submission): void {
+    $slotField = trim((string) $this->configuration['dispatch_slot_field']);
+    if ($slotField === '' || trim((string) $this->submittedValue($form_state, $submission, $slotField)) === '') {
+      return;
+    }
+
+    $originField = trim((string) $this->configuration['origin_address_field']);
+    $destinationField = trim((string) $this->configuration['destination_address_field']);
+    $breakdownField = trim((string) $this->configuration['quote_breakdown_field']);
+    if ($originField === '' || $destinationField === '' || $breakdownField === '') {
+      $form_state->setErrorByName('', $this->t('The current price could not be verified. Please contact us before continuing.'));
+      return;
+    }
+
+    $origin = trim((string) $this->submittedValue($form_state, $submission, $originField));
+    $destination = trim((string) $this->submittedValue($form_state, $submission, $destinationField));
+    if ($origin === '' || $destination === '') {
+      return;
+    }
+
+    // Apply the same server-owned Courier defaults preSave() applies, so the
+    // accepted figure and the figure persisted moments later cannot disagree.
+    $this->canonicalizeCourierInputs($submission);
+
+    $quoteInput = $submission->getData();
+
+    try {
+      $distance = $this->distanceProvider->calculate($origin, $destination);
+      $quote = $this->quoteCalculator->calculate($quoteInput, $distance);
+    }
+    catch (\Throwable $exception) {
+      // The normal preSave path records this as Manual Review. Do not invent a
+      // payable quote or expose provider detail from validation.
+      return;
+    }
+
+    if ($quote->status() === 'manual_review' || $quote->totalCents() < 1) {
+      return;
+    }
+
+    $acceptedRaw = $this->submittedValue($form_state, $submission, $breakdownField);
+    $accepted = NULL;
+    if (is_string($acceptedRaw) && $acceptedRaw !== '') {
+      try {
+        $decoded = json_decode($acceptedRaw, TRUE, 16, JSON_THROW_ON_ERROR);
+        $accepted = is_array($decoded) ? $decoded : NULL;
+      }
+      catch (\JsonException) {
+        $accepted = NULL;
+      }
+    }
+
+    $matches = $accepted !== NULL
+      && (int) ($accepted['total_cents'] ?? -1) === $quote->totalCents()
+      && strtoupper(trim((string) ($accepted['currency'] ?? ''))) === $quote->currency()
+      && trim((string) ($accepted['rate_version'] ?? '')) === $quote->rateVersion();
+    if ($matches) {
+      return;
+    }
+
+    $quoteData = $quote->toArray();
+    $encoded = json_encode($quoteData, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    if (is_string($encoded)) {
+      $form_state->setValue($breakdownField, $encoded);
+      $this->setSubmissionValue($submission, $breakdownField, $encoded);
+    }
+    $this->setAcceptedQuoteFields($form_state, $submission, $quoteData, $distance->distanceMeters());
+
+    $form_state->setErrorByName(
+      $breakdownField,
+      $this->t('Your estimate has been updated to @currency @amount. Review the revised estimate and submit again to accept it.', [
+        '@currency' => $quote->currency(),
+        '@amount' => $quote->totalDecimal(),
+      ]),
+    );
+  }
+
+  /**
+   * Writes one recomputed quote back through the configured Webform fields.
+   */
+  private function setAcceptedQuoteFields(FormStateInterface $form_state, WebformSubmissionInterface $submission, array $quote, int $distanceMeters): void {
+    $values = [
+      $this->configuration['distance_meters_field'] => $distanceMeters,
+      ($this->configuration['quote_total_field'] ?: 'final_calculated_quote') => (string) ($quote['total'] ?? ''),
+      $this->configuration['quote_currency_field'] => (string) ($quote['currency'] ?? ''),
+      $this->configuration['quote_status_field'] => (string) ($quote['status'] ?? ''),
+      $this->configuration['quote_rate_version_field'] => (string) ($quote['rate_version'] ?? ''),
+    ];
+    foreach ($values as $field => $value) {
+      $field = trim((string) $field);
+      if ($field === '') {
+        continue;
+      }
+      $form_state->setValue($field, $value);
+      $this->setSubmissionValue($submission, $field, $value);
+    }
+  }
+
+  /**
+   * Reads the current page first and then the submission's wizard state.
+   */
+  private function submittedValue(FormStateInterface $form_state, WebformSubmissionInterface $submission, string $field): mixed {
+    $value = $form_state->getValue($field);
+
+    return $value ?? $submission->getElementData($field);
   }
 
   /**
@@ -1862,7 +2070,7 @@ class AddressDistanceHandler extends WebformHandlerBase {
   /**
    * Refuses to persist a selected Slot that this session does not already hold.
    *
-   * validateForm() covers the submission form, but it is a form callback: an
+   * The validateForm() method covers the submission form, but it is a form callback: an
    * administrator adding a submission, a programmatic save, an import, or a
    * resave never runs it. postSave() catches those too, but only after Drupal
    * has already written the row — the submission exists while the Slot does not.
@@ -2163,6 +2371,9 @@ class AddressDistanceHandler extends WebformHandlerBase {
     }
   }
 
+  /**
+   * Clears every previously computed distance and quote field.
+   */
   private function clearComputedValues(WebformSubmissionInterface $submission): void {
     $fields = [
       $this->configuration['distance_field'],
@@ -2325,6 +2536,9 @@ class AddressDistanceHandler extends WebformHandlerBase {
     return isset($webform->getElementsInitializedAndFlattened()[$field]);
   }
 
+  /**
+   * Marks the submission as requiring a manual quote review.
+   */
   private function markManualReview(WebformSubmissionInterface $submission, string $reason): void {
     $config = \Drupal::config('custom_webform_handlers.settings');
     $currency = strtoupper((string) ($config->get('quote.currency') ?: 'USD'));
@@ -2353,6 +2567,9 @@ class AddressDistanceHandler extends WebformHandlerBase {
     );
   }
 
+  /**
+   * Writes a value only when the configured Webform element exists.
+   */
   private function setSubmissionValue(WebformSubmissionInterface $submission, string $field, mixed $value): void {
     if ($field === '') {
       return;

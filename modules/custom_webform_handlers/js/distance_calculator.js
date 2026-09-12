@@ -1,11 +1,11 @@
 /**
  * @file
- * Address autocomplete and server-authoritative distance/quote preview.
+ * Server-authoritative distance/quote preview for committed address pairs.
  *
- * This behavior is the only client-side owner of the preview request: it reads
- * the wizard's pricing inputs, asks the site's own endpoint for a distance and
- * preliminary quote, and broadcasts the result as DOM events. The quote summary
- * and route map render those events; they never call the endpoint themselves.
+ * This behavior is the only client-side owner of the preview request. Address
+ * completion is separate and grants permission through one committed-pair
+ * event; generic input, change, focus, date, and Slot events cannot request a
+ * route. The quote summary and route map render its DOM events only.
  *
  * Nothing here is authoritative. Every value written into the form is
  * recalculated server-side on submission, so a disabled, failing, or tampered
@@ -23,8 +23,56 @@
   /** Debounce for pricing-input edits. */
   const REFRESH_DELAY_MS = 400;
 
+  /**
+   * The shape an address must have before the server is asked to resolve it.
+   *
+   * This is deliberately a floor, not a validator: the only cost of refusing a
+   * preview is that the visitor sees the estimate one commit later, whereas the
+   * cost of accepting a fragment is a billed provider request for an address
+   * nobody has finished writing. Server-side validation remains authoritative.
+   */
+  const MIN_ADDRESS_LENGTH = 6;
+  const MIN_ADDRESS_TOKENS = 2;
+
   /** How long to wait for a third-party Maps bootstrap before giving up. */
   const MAPS_WAIT_MS = 10000;
+
+  /**
+   * Collapses an address to the form its fingerprint is computed over.
+   *
+   * A trailing space, a doubled comma, or a change of case is not a new address
+   * and must not buy a new provider request. The preview endpoint applies the
+   * same normalization to its own fingerprint; the two are computed
+   * independently and neither is derived from the other, so a divergence costs
+   * at most one duplicate request and can never admit an unnormalized one.
+   */
+  function normalizeAddress(value) {
+    return String(value == null ? '' : value)
+      .replace(/\s+/g, ' ')
+      .trim()
+      .toLowerCase()
+      .replace(/\s*,\s*/g, ', ')
+      .replace(/(?:,\s*){2,}/g, ', ')
+      .replace(/^[\s,]+/, '')
+      .replace(/[\s,]+$/, '');
+  }
+
+  /**
+   * Whether one address is complete enough to be worth a resolution attempt.
+   */
+  function isResolvableAddress(value) {
+    const normalized = normalizeAddress(value);
+    if (normalized.length < MIN_ADDRESS_LENGTH) {
+      return false;
+    }
+    if (normalized.split(' ').filter(Boolean).length < MIN_ADDRESS_TOKENS) {
+      return false;
+    }
+    // A street address carries a number, or at least a comma-separated
+    // locality. A single bare word is a place name being typed, not a route
+    // endpoint.
+    return /\d/.test(normalized) || normalized.indexOf(',') !== -1;
+  }
 
   /** Shared Maps bootstrap so several forms never inject competing scripts. */
   let mapsLoader = null;
@@ -37,6 +85,9 @@
    * second Webform sharing the page is never touched.
    */
   const FORM_SELECTOR = 'form[data-custom-webform-quote]';
+
+  /** The `once` identifier this behavior attaches and detaches under. */
+  const ONCE_ID = 'custom-webform-distance-calculator';
 
   /**
    * Returns recoverable, human-readable copy for a classified failure code.
@@ -165,6 +216,57 @@
   }
 
   /**
+   * Uses the Webform-wide key so an AJAX wizard UUID change cannot buy a route
+   * that this same browser session has already requested.
+   */
+  function routeStorageKey(key) {
+    const parts = String(key || '').split(':');
+    const root = parts.length > 2 ? parts.slice(0, -1).join(':') : parts.join(':');
+    return root ? `${root}:route-attempts` : '';
+  }
+
+  /**
+   * Reads the bounded per-session route ledger.
+   */
+  function readRouteLedger(key) {
+    if (!key) {
+      return [];
+    }
+    try {
+      const parsed = JSON.parse(window.sessionStorage.getItem(key) || '[]');
+      if (!Array.isArray(parsed)) {
+        return [];
+      }
+      return parsed.filter(
+        (entry) =>
+          entry &&
+          typeof entry === 'object' &&
+          typeof entry.pair === 'string' &&
+          typeof entry.status === 'string' &&
+          Number.isFinite(Number(entry.at)) &&
+          Date.now() - Number(entry.at) <= STORAGE_TTL_MS,
+      );
+    } catch (error) {
+      return [];
+    }
+  }
+
+  /**
+   * Writes at most ten pair attempts. One attempted pair remains attempted even
+   * after an AJAX rebuild, and a successful one carries the reusable result.
+   */
+  function writeRouteLedger(key, ledger) {
+    if (!key) {
+      return;
+    }
+    try {
+      window.sessionStorage.setItem(key, JSON.stringify(ledger.slice(-10)));
+    } catch (error) {
+      // Session storage is optional; the in-memory lock still protects this page.
+    }
+  }
+
+  /**
    * Returns the prior-page context when Drupal has just assigned a draft UUID.
    *
    * A wizard starts under the Webform-wide key and receives its per-submission
@@ -231,22 +333,20 @@
     return collected;
   }
 
-  function mapsPlacesReady() {
+  function mapsReady() {
     return (
       typeof google !== 'undefined' &&
       google.maps &&
       (typeof google.maps.importLibrary === 'function' ||
-        (google.maps.places &&
-          typeof google.maps.places.Autocomplete === 'function'))
+        typeof google.maps.Map === 'function')
     );
   }
 
   /**
    * Loads the Maps JavaScript API once per page and resolves when it is usable.
    *
-   * With loading=async the script's load event can fire before importLibrary()
-   * or the legacy Places namespace exist, so readiness is polled rather than
-   * inferred from the script event.
+   * This loads map rendering only. Address suggestions are self-hosted so Maps
+   * JavaScript can never generate a billed Places request while somebody types.
    */
   function loadMaps(apiKey) {
     if (mapsLoader) {
@@ -255,13 +355,13 @@
 
     mapsLoader = new Promise((resolve, reject) => {
       const waitForReady = () => {
-        if (mapsPlacesReady()) {
+        if (mapsReady()) {
           resolve();
           return;
         }
         const startedAt = Date.now();
         const timer = window.setInterval(() => {
-          if (mapsPlacesReady()) {
+          if (mapsReady()) {
             window.clearInterval(timer);
             resolve();
           } else if (Date.now() - startedAt > MAPS_WAIT_MS) {
@@ -272,7 +372,7 @@
       };
 
       if (
-        mapsPlacesReady() ||
+        mapsReady() ||
         document.querySelector('script[src*="maps.googleapis.com/maps/api/js"]')
       ) {
         waitForReady();
@@ -284,7 +384,7 @@
       }
 
       const script = document.createElement('script');
-      script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly&loading=async&libraries=places`;
+      script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(apiKey)}&v=weekly&loading=async`;
       script.async = true;
       script.defer = true;
       script.onerror = () => reject(new Error('maps_script_failed'));
@@ -307,6 +407,8 @@
       ? config.wizard_context_fields
       : quoteInputNames;
     const storageKey = config.quote_context_key || '';
+    const routeLedgerKey = routeStorageKey(storageKey);
+    const routeLedger = readRouteLedger(routeLedgerKey);
     const previewUrl = config.preview_url || '';
     const csrfTokenUrl = config.csrf_token_url || '';
     const quoteDefaults = config.quote_defaults || {};
@@ -320,10 +422,14 @@
       : null;
     const hasAddressInputs = Boolean(originInput && destinationInput);
 
+    const addressNames = [fieldNames.origin, fieldNames.destination].filter(
+      Boolean,
+    );
+
     // Addresses are persisted too: later wizard pages no longer render them but
     // still need them to refresh the preview after a pricing answer changes.
     const persistedNames = contextInputNames
-      .concat([fieldNames.origin, fieldNames.destination])
+      .concat(addressNames)
       .filter(Boolean);
     const previewEnabled = Boolean(previewUrl && csrfTokenUrl);
 
@@ -332,6 +438,54 @@
     let activeAbort = null;
     let refreshTimer = null;
     let lastRequestKey = '';
+
+    // True from the first keystroke in an address field until that pair is
+    // committed. No route request may leave the browser while it is set.
+    let addressesDirty = true;
+
+    // Address-pair fingerprints. `lastRequested` is set when a request goes out
+    // and `lastSuccessful` when one returns usable facts; the pair is compared
+    // separately from the full request key so a pricing-only edit is
+    // distinguishable from a route change.
+    let lastRequestedPair = '';
+    let lastSuccessfulPair = '';
+
+    // The full request key currently on the wire, or ''. An in-flight marker
+    // rather than a boolean: a second commit for facts already being requested
+    // is dropped, while a pricing edit during the same window still passes.
+    let inFlightKey = '';
+
+    // The last usable response, with the key it answered. Replayed when a
+    // commit asks for facts already known, so reverting an edit restores the
+    // estimate without a request. This is a completed answer for the current
+    // facts, not a superseded response being resurrected.
+    let lastSuccessfulKey = '';
+    let lastSuccessfulData = null;
+
+    // Set while mapped fields are written back, so the input and change events
+    // that writing dispatches are never mistaken for visitor edits.
+    let writingMappedFields = false;
+
+    function routeEntry(pair) {
+      return routeLedger.find((entry) => entry.pair === pair) || null;
+    }
+
+    function recordRouteAttempt(pair, status, data) {
+      const existing = routeEntry(pair);
+      const entry = {
+        pair,
+        status,
+        at: Date.now(),
+        data: data || null,
+      };
+      if (existing) {
+        Object.assign(existing, entry);
+      } else {
+        routeLedger.push(entry);
+      }
+      writeRouteLedger(routeLedgerKey, routeLedger);
+      return entry;
+    }
 
     function persistInput() {
       const merged = collectInput(
@@ -385,6 +539,26 @@
       );
     }
 
+    /**
+     * The fingerprint of one ordered address pair.
+     *
+     * A route is directional, so the pair is ordered and A→B never collides
+     * with B→A.
+     */
+    function pairKey(route) {
+      return JSON.stringify([
+        normalizeAddress(route.origin),
+        normalizeAddress(route.destination),
+      ]);
+    }
+
+    function isCompletePair(route) {
+      return (
+        isResolvableAddress(route.origin) &&
+        isResolvableAddress(route.destination)
+      );
+    }
+
     function setMappedField(key, value) {
       const name = fieldNames[key];
       if (!name) {
@@ -394,9 +568,11 @@
       if (!element) {
         return;
       }
+      writingMappedFields = true;
       element.value = value;
       element.dispatchEvent(new Event('input', { bubbles: true }));
       element.dispatchEvent(new Event('change', { bubbles: true }));
+      writingMappedFields = false;
     }
 
     /**
@@ -477,19 +653,86 @@
       throw new Error('csrf_token_request_failed');
     }
 
+    /**
+     * Writes one usable preview into the form and announces it.
+     *
+     * Extracted so a commit for facts already answered can replay the stored
+     * response instead of buying it again.
+     */
+    function applyPreview(data, route) {
+      const distanceMiles = Number(data.distance.distance_miles);
+      if (!Number.isFinite(distanceMiles) || distanceMiles <= 0) {
+        throw Object.assign(new Error('provider_request_failed'), {
+          code: 'provider_request_failed',
+        });
+      }
+
+      setMappedField('distance', `${distanceMiles.toFixed(2)} mi`);
+      setMappedField('distance_meters', String(data.distance.distance_meters));
+      setMappedField('quote_total', data.quote.total || '');
+      setMappedField('quote_currency', data.quote.currency || '');
+      setMappedField('quote_status', data.quote.status || '');
+      setMappedField('quote_rate_version', data.quote.rate_version || '');
+      setMappedField('quote_breakdown', JSON.stringify(data.quote));
+
+      emit('custom-webform-quote-updated', { quote: data.quote });
+      emit('custom-webform-route-validated', {
+        origin: route.origin,
+        destination: route.destination,
+        distance: data.distance,
+        encodedPolyline: data.distance.encoded_polyline || '',
+        pair: pairKey(route),
+        fingerprint: typeof data.fingerprint === 'string' ? data.fingerprint : '',
+      });
+    }
+
     async function refreshPreview() {
       if (!previewEnabled) {
+        return;
+      }
+      // An uncommitted edit is not a route. This is the single choke point that
+      // keeps typing from reaching a paid provider: every caller passes through
+      // it, and none of them may bypass this test.
+      if (addressesDirty) {
         return;
       }
 
       const input = currentInput();
       const route = addresses(input);
-      if (!route.origin || !route.destination) {
+      const pair = pairKey(route);
+      if (!isCompletePair(route)) {
         invalidateActivePreview();
         lastRequestKey = '';
+        inFlightKey = '';
         clearPreview(
-          Drupal.t('Enter both addresses to see a preliminary estimate.'),
+          route.origin && route.destination
+            ? Drupal.t(
+                'Enter both addresses in full to see a preliminary estimate.',
+              )
+            : Drupal.t('Enter both addresses to see a preliminary estimate.'),
           'incomplete_addresses',
+        );
+        return;
+      }
+
+      const storedRoute = routeEntry(pair);
+      if (
+        storedRoute &&
+        storedRoute.status === 'success' &&
+        storedRoute.data
+      ) {
+        lastSuccessfulPair = pair;
+        lastSuccessfulData = storedRoute.data;
+        addressesDirty = false;
+      }
+      const routeKnown =
+        lastSuccessfulPair === pair && Boolean(lastSuccessfulData);
+      if (storedRoute && storedRoute.status !== 'success' && !routeKnown) {
+        clearPreview(
+          Drupal.t(
+            'This address pair has already been checked. Change an address to try a different route.',
+          ),
+          'route_already_attempted',
         );
         return;
       }
@@ -500,10 +743,37 @@
         route.destination,
         quoteInput,
       ]);
+
+      // Facts already answered. Replay the stored response: no request, and no
+      // period where a valid pair shows no estimate.
+      if (requestKey === lastSuccessfulKey && routeKnown) {
+        try {
+          applyPreview(lastSuccessfulData, route);
+          return;
+        } catch (error) {
+          lastSuccessfulKey = '';
+          lastSuccessfulData = null;
+        }
+      }
+
+      // Already on the wire. A repeated commit for unchanged facts adds nothing.
+      if (requestKey === inFlightKey) {
+        return;
+      }
       if (requestKey === lastRequestKey) {
         return;
       }
+      // A known route makes this a quote-only request. The stored distance is
+      // sent back to the non-authoritative preview endpoint; it must not call a
+      // routing provider again. A new pair gets exactly one route attempt.
+      const routeRequest = !routeKnown;
+      const routeUnchanged = !routeRequest;
       lastRequestKey = requestKey;
+      lastRequestedPair = pair;
+      inFlightKey = requestKey;
+      if (routeRequest) {
+        recordRouteAttempt(pair, 'attempted', null);
+      }
 
       const sequence = ++requestSequence;
       if (activeAbort) {
@@ -518,17 +788,28 @@
 
       emit('custom-webform-quote-pending', {
         message: Drupal.t('Updating your estimate…'),
+        routeUnchanged,
       });
 
       try {
-        const response = await postPreview(
-          {
-            origin: route.origin,
-            destination: route.destination,
-            quote_input: quoteInput,
-          },
-          abort.controller.signal,
-        );
+        const payload = {
+          origin: route.origin,
+          destination: route.destination,
+          quote_input: quoteInput,
+        };
+        if (!routeRequest) {
+          payload.cached_distance = {
+            distance_meters:
+              lastSuccessfulData.distance.distance_meters,
+            duration_seconds:
+              lastSuccessfulData.distance.duration_seconds,
+            provider: lastSuccessfulData.distance.provider,
+            calculated_at:
+              lastSuccessfulData.distance.calculated_at,
+          };
+          payload.route_fingerprint = lastSuccessfulData.fingerprint || '';
+        }
+        const response = await postPreview(payload, abort.controller.signal);
 
         let data = {};
         try {
@@ -552,31 +833,18 @@
           throw Object.assign(new Error(code), { code });
         }
 
-        const distanceMiles = Number(data.distance.distance_miles);
-        if (!Number.isFinite(distanceMiles) || distanceMiles <= 0) {
-          throw Object.assign(new Error('provider_request_failed'), {
-            code: 'provider_request_failed',
-          });
+        if (!routeRequest) {
+          // Quote-only responses deliberately omit route geometry. Preserve the
+          // one Google result already held by this session.
+          data.distance = lastSuccessfulData.distance;
+          data.fingerprint = lastSuccessfulData.fingerprint || '';
         }
 
-        setMappedField('distance', `${distanceMiles.toFixed(2)} mi`);
-        setMappedField(
-          'distance_meters',
-          String(data.distance.distance_meters),
-        );
-        setMappedField('quote_total', data.quote.total || '');
-        setMappedField('quote_currency', data.quote.currency || '');
-        setMappedField('quote_status', data.quote.status || '');
-        setMappedField('quote_rate_version', data.quote.rate_version || '');
-        setMappedField('quote_breakdown', JSON.stringify(data.quote));
-
-        emit('custom-webform-quote-updated', { quote: data.quote });
-        emit('custom-webform-route-validated', {
-          origin: route.origin,
-          destination: route.destination,
-          distance: data.distance,
-          encodedPolyline: data.distance.encoded_polyline || '',
-        });
+        applyPreview(data, route);
+        lastSuccessfulKey = requestKey;
+        lastSuccessfulData = data;
+        lastSuccessfulPair = pair;
+        recordRouteAttempt(pair, 'success', data);
       } catch (error) {
         if (sequence !== requestSequence && !abort.timedOut) {
           // Superseded by a newer request; that request owns the UI state.
@@ -593,13 +861,21 @@
               ? 'network_unavailable'
               : 'provider_request_failed';
         }
-        // Allow the next identical edit to retry a recoverable failure.
-        lastRequestKey = '';
+        if (routeRequest) {
+          recordRouteAttempt(pair, 'failed', null);
+        } else {
+          // A quote-only failure did not spend a route request and may be
+          // retried after the visitor changes another pricing answer.
+          lastRequestKey = '';
+        }
         clearPreview(messageFor(code), code);
       } finally {
         window.clearTimeout(abort.timer);
         if (activeAbort === abort) {
           activeAbort = null;
+        }
+        if (inFlightKey === requestKey) {
+          inFlightKey = '';
         }
       }
     }
@@ -609,37 +885,187 @@
       refreshTimer = window.setTimeout(refreshPreview, REFRESH_DELAY_MS);
     }
 
-    function isTrackedInput(element) {
+    function baseName(element) {
       if (!element || !element.name) {
-        return false;
+        return '';
       }
-      const base = element.name.replace(/\[.*$/, '');
-      return persistedNames.indexOf(base) !== -1;
+      return element.name.replace(/\[.*$/, '');
     }
 
-    form.addEventListener('input', (event) => {
+    function isTrackedInput(element) {
+      const base = baseName(element);
+      return base !== '' && persistedNames.indexOf(base) !== -1;
+    }
+
+    function isQuoteInput(element) {
+      const base = baseName(element);
+      return base !== '' && quoteInputNames.indexOf(base) !== -1;
+    }
+
+    function isAddressInput(element) {
+      const base = baseName(element);
+      return base !== '' && addressNames.indexOf(base) !== -1;
+    }
+
+    /**
+     * Records that an address is being edited and takes the stale route down.
+     *
+     * This is the whole of item 1: the edit cancels pending work, clears the
+     * route, the quote and any selected Slot, and dispatches nothing. Aborting
+     * is UI cleanup only — a request already transmitted has already been billed
+     * upstream and cannot be recalled.
+     */
+    function markAddressesDirty(message) {
+      const wasDirty = addressesDirty;
+      addressesDirty = true;
+      window.clearTimeout(refreshTimer);
+      invalidateActivePreview();
+      inFlightKey = '';
+      // A later commit may replay a successful ledger entry, but an attempted
+      // pair is never sent to the provider twice in this browser session.
+      lastRequestKey = '';
+      if (wasDirty) {
+        return;
+      }
+      // Tells dispatch_slots to drop the selected Slot and suspend polling. It
+      // is a distinct event from `route-cleared`, which also fires for provider
+      // failures where the committed pair is still valid.
+      emit('custom-webform-address-dirty', {
+        message: message || '',
+        lastSuccessfulPair,
+      });
+      clearPreview(
+        message ||
+          Drupal.t(
+            'Finish entering the address to see an updated estimate — you can still submit the form.',
+          ),
+        'incomplete_addresses',
+      );
+    }
+
+    /**
+     * Treats the current address pair as finished and asks for one preview.
+     *
+     * An incomplete pair stays dirty: the visitor is still mid-address, and no
+     * amount of waiting turns a fragment into a route.
+     */
+    function commitAddresses() {
+      const route = addresses(currentInput());
+      if (!isCompletePair(route)) {
+        return;
+      }
+      addressesDirty = false;
+      refreshPreview();
+    }
+
+    function onFormInput(event) {
+      if (writingMappedFields) {
+        return;
+      }
+      if (isAddressInput(event.target)) {
+        persistInput();
+        markAddressesDirty();
+        return;
+      }
       if (!isTrackedInput(event.target)) {
         return;
       }
       persistInput();
-      scheduleRefresh();
-    });
-    form.addEventListener('change', (event) => {
+      // Only price inputs may ask for a quote-only refresh. Dates, Slots and
+      // other dispatch inputs never touch the distance endpoint.
+      if (isQuoteInput(event.target)) {
+        scheduleRefresh();
+      }
+    }
+
+    function onFormChange(event) {
+      if (writingMappedFields) {
+        return;
+      }
+      if (isAddressInput(event.target)) {
+        persistInput();
+        return;
+      }
       if (!isTrackedInput(event.target)) {
         return;
       }
       persistInput();
-      scheduleRefresh();
+      if (isQuoteInput(event.target)) {
+        scheduleRefresh();
+      }
+    }
+
+    /**
+     * The only event allowed to turn an address pair into a route request.
+     */
+    function onAddressCommitted(event) {
+      persistInput();
+      const route = addresses(currentInput());
+      if (
+        !event.detail ||
+        event.detail.pair !== pairKey(route) ||
+        !isCompletePair(route)
+      ) {
+        return;
+      }
+      commitAddresses();
+    }
+
+    /**
+     * A submission owns the outcome from here; the server recalculates.
+     */
+    function onFormSubmit() {
+      window.clearTimeout(refreshTimer);
+    }
+
+    const listeners = [
+      ['input', onFormInput],
+      ['change', onFormChange],
+      ['custom-webform-address-committed', onAddressCommitted],
+      ['submit', onFormSubmit],
+    ];
+    listeners.forEach(([type, handler]) => {
+      form.addEventListener(type, handler);
     });
 
-    // Seed storage from whatever this wizard page renders. A preview only runs
-    // on load when both addresses are already known, so a resumed draft's
-    // server-stored breakdown is never wiped before it can be displayed.
+    /**
+     * Releases everything this form holds.
+     *
+     * Timers and the pending request go first, then the delegated listeners.
+     * Widget listeners are bound to the widget element itself and are released
+     * with it when an AJAX rebuild replaces the form's markup.
+     */
+    function teardown() {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = null;
+      invalidateActivePreview();
+      inFlightKey = '';
+      listeners.forEach(([type, handler]) => {
+        form.removeEventListener(type, handler);
+      });
+    }
+
+    // Seed storage from whatever this wizard page renders. Reattach may replay
+    // a successful session result, but attach itself can never request a route.
     persistInput();
     if (previewEnabled) {
       const known = addresses(currentInput());
-      if (known.origin && known.destination) {
-        refreshPreview();
+      const pair = pairKey(known);
+      const storedRoute = routeEntry(pair);
+      if (
+        isCompletePair(known) &&
+        storedRoute &&
+        storedRoute.status === 'success' &&
+        storedRoute.data
+      ) {
+        lastSuccessfulPair = pair;
+        lastSuccessfulData = storedRoute.data;
+        lastSuccessfulKey = JSON.stringify([
+          known.origin,
+          known.destination,
+          pricingPayload(currentInput()),
+        ]);
+        applyPreview(lastSuccessfulData, known);
       }
     }
 
@@ -648,144 +1074,45 @@
       destinationInput.setAttribute('autocomplete', 'street-address');
     }
 
-    /**
-     * Replaces one address input with a Places widget, keeping the Webform's
-     * own input as the submitted value.
-     */
-    function attachAutocomplete(
-      input,
-      PlaceAutocompleteElement,
-      LegacyAutocomplete,
-      placeholder,
-    ) {
-      if (LegacyAutocomplete) {
-        input.setAttribute(
-          'placeholder',
-          input.getAttribute('placeholder') || placeholder,
-        );
-        const autocomplete = new LegacyAutocomplete(input, {
-          fields: ['formatted_address'],
-          types: ['address'],
-        });
-        autocomplete.addListener('place_changed', () => {
-          const place = autocomplete.getPlace();
-          const address =
-            place && place.formatted_address
-              ? place.formatted_address
-              : input.value.trim();
-          if (!address) {
-            return;
-          }
-          input.value = address;
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-        });
-        return;
-      }
-
-      const widget = new PlaceAutocompleteElement();
-      widget.id = `${input.id || input.name}--place-autocomplete`;
-      widget.placeholder = input.value || placeholder;
-      input.insertAdjacentElement('afterend', widget);
-
-      const label = input.id
-        ? form.querySelector(`label[for="${attr(input.id)}"]`)
-        : null;
-      if (label) {
-        label.setAttribute('for', widget.id);
-      }
-      input.classList.add('visually-hidden');
-      input.setAttribute('aria-hidden', 'true');
-      input.setAttribute('tabindex', '-1');
-      input.removeAttribute('required');
-
-      const status = document.createElement('p');
-      status.className = 'custom-address-autocomplete-status visually-hidden';
-      status.setAttribute('role', 'status');
-      status.setAttribute('aria-live', 'polite');
-      widget.insertAdjacentElement('afterend', status);
-
-      widget.addEventListener('input', () => {
-        // A partially typed address is not a route; drop the stale preview.
-        input.value = '';
-        invalidateActivePreview();
-        lastRequestKey = '';
-        persistInput();
-        clearPreview(
-          Drupal.t('Select a complete address from the suggestions.'),
-          'incomplete_addresses',
-        );
-      });
-
-      widget.addEventListener('gmp-select', async (event) => {
-        try {
-          const place = event.placePrediction.toPlace();
-          await place.fetchFields({ fields: ['formattedAddress'] });
-          input.value = place.formattedAddress || '';
-          input.dispatchEvent(new Event('input', { bubbles: true }));
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-          status.textContent = Drupal.t('Address selected.');
-        } catch (error) {
-          status.classList.remove('visually-hidden');
-          status.textContent = Drupal.t(
-            'That address could not be loaded. Please choose it again or type it in full.',
-          );
-        }
-      });
-    }
-
     if (!apiKey) {
-      return;
+      return { teardown };
     }
 
-    loadMaps(apiKey)
-      .then(async () => {
-        if (!hasAddressInputs) {
-          return;
-        }
+    loadMaps(apiKey).catch(() => {
+      // The route map is optional; address entry and the server-side preview
+      // keep working when Maps JavaScript is unavailable.
+    });
 
-        let PlaceAutocompleteElement = null;
-        let LegacyAutocomplete = null;
-        if (typeof google.maps.importLibrary === 'function') {
-          ({ PlaceAutocompleteElement } =
-            await google.maps.importLibrary('places'));
-        } else if (
-          google.maps.places &&
-          typeof google.maps.places.Autocomplete === 'function'
-        ) {
-          LegacyAutocomplete = google.maps.places.Autocomplete;
-        } else {
-          return;
-        }
-        attachAutocomplete(
-          originInput,
-          PlaceAutocompleteElement,
-          LegacyAutocomplete,
-          Drupal.t('Enter origin address'),
-        );
-        attachAutocomplete(
-          destinationInput,
-          PlaceAutocompleteElement,
-          LegacyAutocomplete,
-          Drupal.t('Enter destination address'),
-        );
-      })
-      .catch(() => {
-        // Maps and autocomplete are optional; the plain address inputs and the
-        // server-side preview keep working when they are unavailable.
-      });
+    return { teardown };
   }
+
+  // One live experience per set-up form, so a detach can release its timers,
+  // pending request and delegated listeners when an AJAX wizard rebuild removes
+  // the form they were attached to.
+  const instances = new WeakMap();
 
   Drupal.behaviors.customWebformDistanceCalculator = {
     attach(context, settings) {
-      once(
-        'custom-webform-distance-calculator',
-        FORM_SELECTOR,
-        context,
-      ).forEach((form) => {
+      once(ONCE_ID, FORM_SELECTOR, context).forEach((form) => {
         const config = settingsFor(form, settings);
         if (config) {
-          setupForm(form, config);
+          instances.set(form, setupForm(form, config));
+        }
+      });
+    },
+    detach(context, settings, trigger) {
+      // Only 'unload' means the form is going away. Drupal also detaches with
+      // 'serialize' before an AJAX submit, and releasing the listeners then
+      // would leave a form that the response does not replace permanently
+      // unwired, because its `once` mark survives.
+      if (trigger !== 'unload') {
+        return;
+      }
+      once.filter(ONCE_ID, FORM_SELECTOR, context).forEach((form) => {
+        const instance = instances.get(form);
+        if (instance) {
+          instance.teardown();
+          instances.delete(form);
         }
       });
     },
