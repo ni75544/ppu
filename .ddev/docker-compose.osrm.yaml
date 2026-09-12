@@ -1,0 +1,53 @@
+# Private OSRM router for Task 20H local activation.
+#
+# The image, car profile, source extract, and generated graph are pinned in the
+# routing rollout record. Nothing is published to the host: Drupal reaches this
+# service only over the project network at http://ppu-osrm:5000.
+services:
+  osrm:
+    container_name: ddev-${DDEV_SITENAME}-osrm
+    image: ghcr.io/project-osrm/osrm-backend:26.8.0-debian@sha256:05d11e09c919d32996c3ae0784fda841c688943cf4ae4ec67f38d222082d04af
+    hostname: ppu-osrm
+    labels:
+      com.ddev.site-name: ${DDEV_SITENAME}
+      com.ddev.approot: ${DDEV_APPROOT}
+    entrypoint: []
+    command:
+      - osrm-routed
+      - --algorithm
+      - mld
+      - --ip
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --threads
+      - "2"
+      - /data/nyc-metro-260904.osrm
+    user: "65534:65534"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 128
+    restart: "no"
+    expose:
+      - 5000
+    volumes:
+      - ppu-osrm-graph:/data:ro
+    networks:
+      default:
+        aliases:
+          - ppu-osrm
+    x-ddev:
+      describe-info: |
+        OSRM 26.8.0 -- nyc-metro-260904 (internal only: http://ppu-osrm:5000)
+
+volumes:
+  ppu-osrm-graph:
+    external: true
+    name: ppu-osrm-nycmetro-20260904-v2680

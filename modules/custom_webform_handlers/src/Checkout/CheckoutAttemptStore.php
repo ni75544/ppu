@@ -55,6 +55,9 @@ final class CheckoutAttemptStore {
     'quote_amount_cents',
     'quote_currency',
     'quote_rate_version',
+    'quote_route_source',
+    'quote_route_fingerprint',
+    'quote_route_calculated_at',
     'state',
     'idempotency_key',
     'dispatch_reservation_id',
@@ -101,6 +104,9 @@ final class CheckoutAttemptStore {
           'quote_amount_cents' => $attempt->quote->amountCents,
           'quote_currency' => $attempt->quote->currency,
           'quote_rate_version' => $attempt->quote->rateVersion,
+          'quote_route_source' => $attempt->quote->routeSource ?: NULL,
+          'quote_route_fingerprint' => $attempt->quote->routeFingerprint ?: NULL,
+          'quote_route_calculated_at' => $attempt->quote->routeCalculatedAt ?: NULL,
           'state' => CheckoutState::Pending->value,
           'idempotency_key' => $attempt->idempotencyKey,
           'dispatch_reservation_id' => NULL,
@@ -289,6 +295,9 @@ final class CheckoutAttemptStore {
       isset($row->quote_amount_cents) ? (int) $row->quote_amount_cents : NULL,
       isset($row->quote_currency) ? (string) $row->quote_currency : NULL,
       isset($row->quote_rate_version) ? (string) $row->quote_rate_version : NULL,
+      isset($row->quote_route_source) ? (string) $row->quote_route_source : NULL,
+      isset($row->quote_route_fingerprint) ? (string) $row->quote_route_fingerprint : NULL,
+      isset($row->quote_route_calculated_at) ? (int) $row->quote_route_calculated_at : NULL,
     );
     $attemptId = (int) ($row->attempt_id ?? 0);
 
@@ -329,4 +338,5 @@ final class CheckoutAttemptStore {
       isset($row->settled) ? (int) $row->settled : NULL,
     );
   }
+
 }

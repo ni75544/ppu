@@ -20,7 +20,14 @@ namespace Drupal\custom_webform_handlers\Distance;
  * classification; they differ only in the routing preference they ask for, the
  * fields they request back, and therefore in their cache identity.
  *
+ * Not every provider can implement this. A self-hosted OSRM extract has no live
+ * traffic feed, so it declares only DistanceProviderInterface — and RoutingPolicy
+ * refuses to place it in a purpose that asks this question, rather than accepting the
+ * configuration and quietly returning a free-flow duration where a traffic-priced one
+ * was required. Absence from this interface is a capability statement, not a gap.
+ *
  * @see \Drupal\custom_webform_handlers\Distance\DistanceProviderInterface
+ * @see \Drupal\custom_webform_handlers\Distance\RoutingPolicy
  * @see \Drupal\custom_webform_handlers\Dispatch\Route\DistanceProviderRouteEstimator
  */
 interface ScheduledRouteProviderInterface {
@@ -32,7 +39,8 @@ interface ScheduledRouteProviderInterface {
    * configured bucket so that scheduling a day does not issue one billed request
    * per grid candidate, and they may move it forward to satisfy the provider's own
    * "must be in the future" rule. The returned result records what was actually
-   * asked, so a caller never has to assume.
+   * asked, on DistanceResult::effectiveDepartureAt(), so a caller never has to
+   * assume it got the instant it named.
    *
    * A result whose trafficAware() is FALSE is a real route that was not priced
    * against traffic. It must be treated as optimistic at peak and never as

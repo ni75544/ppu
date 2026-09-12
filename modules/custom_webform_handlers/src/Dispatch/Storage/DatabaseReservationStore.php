@@ -485,6 +485,50 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
   /**
    * {@inheritdoc}
    */
+  public function heldForPlanning(string $rawHoldToken, string $rawOwnerId): ?LockedHold {
+    if (trim($rawHoldToken) === '' || trim($rawOwnerId) === '') {
+      return NULL;
+    }
+
+    $row = $this->database->select(self::TABLE, 'r')
+      ->fields('r', self::READ_FIELDS)
+      ->condition('r.hold_token_hash', $this->hash($rawHoldToken))
+      ->condition('r.owner_hash', $this->hash($rawOwnerId))
+      ->condition('r.state', self::STATE_HELD)
+      ->condition('r.expires_at', $this->time->getRequestTime(), '>')
+      ->range(0, 1)
+      ->execute()
+      ->fetchObject();
+    if (!$row) {
+      return NULL;
+    }
+
+    try {
+      $slot = $this->slotFromRow($row);
+    }
+    catch (StoredSlotException $exception) {
+      $this->logger->error('Dispatch Hold @id cannot be prepared for confirmation: @message', [
+        '@id' => (int) $row->dispatch_reservation_id,
+        '@message' => $exception->getMessage(),
+      ]);
+      return NULL;
+    }
+
+    return new LockedHold(
+      (int) $row->dispatch_reservation_id,
+      $slot,
+      (int) $row->window_start,
+      (int) $row->window_end,
+      (int) $row->inbound_reposition_seconds,
+      (int) $row->outbound_reposition_seconds,
+      (string) $row->webform_id,
+      (int) $row->expires_at,
+    );
+  }
+
+  /**
+   * {@inheritdoc}
+   */
   public function replan(DispatchReplan $replan, callable $revalidate): ReplanResult {
     if ($replan->reservationId <= 0 || $replan->submissionId <= 0) {
       return ReplanResult::refused(DispatchReason::InvalidRequest);
@@ -912,7 +956,16 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
     // Ordered by the time each segment actually removes from the Resource, so a
     // lane can be drawn straight from this list. The end is a tie-break only, to
     // keep two segments that begin together in a stable order.
-    usort($entries, static fn (DispatchTimelineEntry $a, DispatchTimelineEntry $b): int => [$a->occupiedStart(), $a->occupiedEnd()] <=> [$b->occupiedStart(), $b->occupiedEnd()]);
+    usort(
+      $entries,
+      static fn (DispatchTimelineEntry $a, DispatchTimelineEntry $b): int => [
+        $a->occupiedStart(),
+        $a->occupiedEnd(),
+      ] <=> [
+        $b->occupiedStart(),
+        $b->occupiedEnd(),
+      ],
+    );
 
     return $entries;
   }
@@ -1408,6 +1461,14 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
   /**
    * Tells whether any live claim intrudes into a protected interval.
    *
+   * @param string $resourceId
+   *   The resource whose capacity is being checked.
+   * @param int $protectedStart
+   *   The beginning of the protected interval.
+   * @param int $protectedEnd
+   *   The end of the protected interval.
+   * @param int $now
+   *   The current request time, in UTC.
    * @param int|null $excludeReservationId
    *   A claim to ignore. Set only when that claim is the one being re-proved or
    *   moved, where counting it would make it conflict with the space it already
@@ -1497,6 +1558,7 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
    * worst case is that a contender waits on a day it did not need.
    *
    * @return string[]
+   *   The touched local calendar dates in YYYY-MM-DD format.
    */
   private function datesForRow(object $row): array {
     return $this->datesForInterval(
@@ -1513,6 +1575,7 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
    * which carry none and are read in the Resource's zone the caller supplies.
    *
    * @return string[]
+   *   The touched local calendar dates in YYYY-MM-DD format.
    */
   private function datesForInterval(int $start, int $end, string $timezone): array {
     try {

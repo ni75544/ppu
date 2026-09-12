@@ -23,6 +23,21 @@ manage dispatch schedule:
   description: 'Withhold Resource time, release held or confirmed capacity, replan a Reservation onto a new proved time, and book requests held for staff review.'
   restrict access: true
 
+# Spending authority, which is why it is neither of the two above and not site
+# configuration either. Everything this grants is a decision about cost: which
+# provider is asked for a route, in what order, how long each is waited for, and how
+# many requests each may make in a billing period. Raising one allowance is what
+# lets the provider chain bill anything at all.
+#
+# It discloses no credential. The settings form reports each provider's key as
+# installed or missing and cannot read, render, or store a value, so granting this
+# does not hand anybody a token — which is what makes it safe to grant to whoever
+# owns the routing budget rather than only to whoever owns settings.php.
+administer routing providers:
+  title: 'Administer routing providers'
+  description: 'Choose which routing provider answers ordinary quotes, public offers, and validated final operations; set timeouts, deadlines, cache lifetimes, circuit breakers, and per-period request allowances. Grants no access to any provider credential.'
+  restrict access: true
+
 # The four disclosure permissions below are specification item 7 and 8's split. Until
 # now the board was readable by whoever could configure the planner and mutable by
 # whoever could read it, and every column of a Reservation was visible to both. That is

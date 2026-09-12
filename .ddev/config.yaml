@@ -14,7 +14,8 @@ database:
     version: "11.8"
 use_dns_when_possible: true
 composer_version: "2"
-web_environment: []
+web_environment:
+    - CUSTOM_WEBFORM_HANDLERS_OSRM_BASE_URL=http://ppu-osrm:5000
 nodejs_version: "24"
 corepack_enable: false
 default_container_timeout: "240"

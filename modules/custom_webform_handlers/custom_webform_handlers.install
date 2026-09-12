@@ -346,6 +346,11 @@ function custom_webform_handlers_schema(): array {
       'quote_amount_cents' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
       'quote_currency' => ['type' => 'varchar_ascii', 'length' => 3, 'not null' => TRUE],
       'quote_rate_version' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => TRUE],
+      // Bounded provenance for the exact route the locked price used. These are
+      // operational audit facts, not a reusable provider response or geometry.
+      'quote_route_source' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => FALSE],
+      'quote_route_fingerprint' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => FALSE],
+      'quote_route_calculated_at' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
       // pending, paid, failed, cancelled, or reconciliation_required.
       'state' => ['type' => 'varchar_ascii', 'length' => 32, 'not null' => TRUE],
       // Derived from the job, the Slot, and the price — never supplied by a caller.
@@ -443,6 +448,64 @@ function custom_webform_handlers_schema(): array {
     'indexes' => [
       'review_queue' => ['state', 'created'],
       'review_expiry' => ['state', 'expires_at'],
+    ],
+  ];
+
+  // Durable allowance ledger. This is deliberately not a cache or State API
+  // value: clearing Redis must never restore permission to issue paid requests.
+  $schema['custom_webform_handlers_routing_budget'] = [
+    'description' => 'Atomic per-provider request reservations by product, purpose, and fixed billing period.',
+    'fields' => [
+      'budget_id' => ['type' => 'serial', 'unsigned' => TRUE, 'not null' => TRUE],
+      'provider' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => TRUE],
+      'product' => ['type' => 'varchar_ascii', 'length' => 32, 'not null' => TRUE],
+      'purpose' => ['type' => 'varchar_ascii', 'length' => 32, 'not null' => TRUE],
+      'period_start' => ['type' => 'int', 'size' => 'big', 'unsigned' => TRUE, 'not null' => TRUE],
+      'period_end' => ['type' => 'int', 'size' => 'big', 'unsigned' => TRUE, 'not null' => TRUE],
+      'requests' => ['type' => 'int', 'size' => 'big', 'unsigned' => TRUE, 'not null' => TRUE, 'default' => 0],
+      'limit_snapshot' => ['type' => 'int', 'size' => 'big', 'unsigned' => TRUE, 'not null' => FALSE],
+      'created' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
+      'changed' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
+    ],
+    'primary key' => ['budget_id'],
+    'unique keys' => [
+      'routing_budget_identity' => ['provider', 'product', 'purpose', 'period_start'],
+    ],
+    'indexes' => [
+      'routing_budget_period_end' => ['period_end'],
+      'routing_budget_provider_period' => ['provider', 'product', 'period_start'],
+    ],
+  ];
+
+  // Low-cardinality local observations for the permissioned routing dashboard.
+  // No address, coordinate, route payload, endpoint, or credential is stored.
+  $schema['custom_webform_handlers_routing_usage'] = [
+    'description' => 'Local routing counters by provider, purpose, event, reason, and fixed allowance period.',
+    'fields' => [
+      'usage_id' => ['type' => 'serial', 'unsigned' => TRUE, 'not null' => TRUE],
+      'provider' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => TRUE],
+      'purpose' => ['type' => 'varchar_ascii', 'length' => 32, 'not null' => TRUE],
+      'event' => ['type' => 'varchar_ascii', 'length' => 32, 'not null' => TRUE],
+      'reason' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => TRUE, 'default' => ''],
+      'period_start' => ['type' => 'int', 'size' => 'big', 'unsigned' => TRUE, 'not null' => TRUE],
+      'period_end' => ['type' => 'int', 'size' => 'big', 'unsigned' => TRUE, 'not null' => TRUE],
+      'occurrences' => ['type' => 'int', 'size' => 'big', 'unsigned' => TRUE, 'not null' => TRUE, 'default' => 0],
+      'created' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
+      'changed' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
+    ],
+    'primary key' => ['usage_id'],
+    'unique keys' => [
+      'routing_usage_identity' => [
+        'provider',
+        'purpose',
+        'event',
+        'reason',
+        'period_start',
+      ],
+    ],
+    'indexes' => [
+      'routing_usage_period_end' => ['period_end'],
+      'routing_usage_provider_period' => ['provider', 'purpose', 'period_start'],
     ],
   ];
 
@@ -4169,4 +4232,104 @@ function custom_webform_handlers_update_10040(): string {
   return (string) t('Manual Review now recognises @count handling flags including unsure, so an unattested or crafted acknowledgement is routed to review instead of being read as a clean answer.', [
     '@count' => count($flags),
   ]);
+}
+
+/**
+ * Selects the provisioned self-hosted geocoder on an existing installation.
+ *
+ * The update is deliberately conditional on both the contrib module and the
+ * exported provider entity. It never replaces a different provider an operator
+ * has already selected. The selected source is private Nominatim over the pinned
+ * NYC metro extract, whose Task 20D policy permits persistent and cross-provider
+ * coordinate use.
+ */
+function custom_webform_handlers_update_10041(): string {
+  if (!\Drupal::moduleHandler()->moduleExists('geocoder')) {
+    return (string) t('The Geocoder module is not enabled; coordinate resolution remains unselected.');
+  }
+
+  $provider = \Drupal::entityTypeManager()
+    ->getStorage('geocoder_provider')
+    ->load('ppu_nominatim');
+  if ($provider === NULL) {
+    return (string) t('The ppu_nominatim provider entity is absent; coordinate resolution remains unselected.');
+  }
+
+  $config = \Drupal::configFactory()->getEditable('custom_webform_handlers.settings');
+  $selected = trim((string) $config->get('routing.geocoder.provider'));
+  if ($selected !== '' && $selected !== 'ppu_nominatim') {
+    return (string) t('Coordinate resolution already names @provider; the existing operator selection was preserved.', [
+      '@provider' => $selected,
+    ]);
+  }
+
+  $config
+    ->set('routing.geocoder.provider', 'ppu_nominatim')
+    ->set('routing.geocoder.version', 'nycmetro-20260904T202121Z+md5.77b0c1c4')
+    ->set('routing.geocoder.persist', TRUE)
+    ->set('routing.geocoder.request_allowance', 100000)
+    ->save();
+
+  return (string) t('Committed addresses now use the pinned ppu_nominatim provider with permitted persistent coordinate storage and a 100,000-request monthly operational ceiling.');
+}
+
+/**
+ * Adds the durable external-request allowance ledger.
+ */
+function custom_webform_handlers_update_10042(): string {
+  $database_schema = \Drupal::database()->schema();
+  $table = 'custom_webform_handlers_routing_budget';
+  if ($database_schema->tableExists($table)) {
+    return (string) t('The routing request allowance ledger already exists; nothing changed.');
+  }
+
+  $definition = custom_webform_handlers_schema()[$table];
+  $database_schema->createTable($table, $definition);
+
+  return (string) t('Created the durable routing request allowance ledger.');
+}
+
+/**
+ * Adds bounded route provenance to Checkout Attempt price snapshots.
+ */
+function custom_webform_handlers_update_10043(): string {
+  $schema = \Drupal::database()->schema();
+  $table = 'custom_webform_handlers_checkout_attempt';
+  if (!$schema->tableExists($table)) {
+    return (string) t('The Checkout Attempt table is not present, so no route provenance columns were added.');
+  }
+
+  $definition = custom_webform_handlers_schema()[$table];
+  $added = [];
+  foreach ([
+    'quote_route_source',
+    'quote_route_fingerprint',
+    'quote_route_calculated_at',
+  ] as $field) {
+    if ($schema->fieldExists($table, $field)) {
+      continue;
+    }
+    $schema->addField($table, $field, $definition['fields'][$field]);
+    $added[] = $field;
+  }
+
+  return $added === []
+    ? (string) t('Checkout Attempt route provenance columns already exist; nothing changed.')
+    : (string) t('Added bounded route provenance to Checkout Attempt price snapshots.');
+}
+
+/**
+ * Adds permission-safe local routing usage counters.
+ */
+function custom_webform_handlers_update_10044(): string {
+  $schema = \Drupal::database()->schema();
+  $table = 'custom_webform_handlers_routing_usage';
+  if ($schema->tableExists($table)) {
+    return (string) t('The local routing usage counter table already exists; nothing changed.');
+  }
+
+  $definition = custom_webform_handlers_schema()[$table];
+  $schema->createTable($table, $definition);
+
+  return (string) t('Created local routing usage counters for the permissioned provider dashboard.');
 }

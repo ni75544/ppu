@@ -3,6 +3,83 @@ services:
     parent: logger.channel_base
     arguments: ['custom_webform_handlers']
 
+  cache.custom_webform_handlers_coordinates:
+    class: Drupal\Core\Cache\CacheBackendInterface
+    tags:
+      - { name: cache.bin }
+    factory: ['@cache_factory', 'get']
+    arguments: [custom_webform_handlers_coordinates]
+
+  cache.custom_webform_handlers_routes:
+    class: Drupal\Core\Cache\CacheBackendInterface
+    tags:
+      - { name: cache.bin }
+    factory: ['@cache_factory', 'get']
+    arguments: [custom_webform_handlers_routes]
+
+  custom_webform_handlers.route_cache:
+    class: Drupal\custom_webform_handlers\Distance\RouteCache
+    arguments:
+      - '@cache.custom_webform_handlers_routes'
+      - '@lock'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.routing_budget_store:
+    class: Drupal\custom_webform_handlers\Distance\Storage\DatabaseRoutingBudgetStore
+    arguments:
+      - '@database'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.routing_budget:
+    class: Drupal\custom_webform_handlers\Distance\RoutingBudget
+    arguments:
+      - '@custom_webform_handlers.routing_budget_store'
+      - '@config.factory'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.provider_circuit:
+    class: Drupal\custom_webform_handlers\Distance\ProviderCircuit
+    arguments:
+      - '@state'
+      - '@lock'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.routing_usage:
+    class: Drupal\custom_webform_handlers\Distance\RoutingUsage
+    arguments:
+      - '@database'
+      - '@config.factory'
+      - '@custom_webform_handlers.routing_budget'
+      - '@custom_webform_handlers.provider_circuit'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.coordinate_cache:
+    class: Drupal\custom_webform_handlers\Distance\CoordinateCache
+    arguments:
+      - '@cache.custom_webform_handlers_coordinates'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.address_coordinate_resolver:
+    class: Drupal\custom_webform_handlers\Distance\AddressCoordinateResolver
+    arguments:
+      - '@entity_type.manager'
+      - '@?plugin.manager.geocoder.provider'
+      - '@config.factory'
+      - '@language_manager'
+      - '@config.typed'
+      - '@?geocoder.http_adapter'
+      - '@?geocoder.throttle'
+      - '@token'
+      - '@custom_webform_handlers.coordinate_cache'
+      - '@custom_webform_handlers.routing_budget'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
   custom_webform_handlers.google_routes_distance_provider:
     class: Drupal\custom_webform_handlers\Distance\GoogleRoutesDistanceProvider
     arguments:
@@ -10,9 +87,95 @@ services:
       - '@cache.default'
       - '@config.factory'
       - '@logger.channel.custom_webform_handlers'
+      - '@datetime.time'
+
+  # The fallback chain owns caching and reserves budget immediately before this
+  # adapter can dispatch. Its internal legacy cache is therefore disabled here.
+  custom_webform_handlers.google_routes_chain_provider:
+    class: Drupal\custom_webform_handlers\Distance\GoogleRoutesDistanceProvider
+    arguments:
+      - '@http_client'
+      - '@cache.default'
+      - '@config.factory'
+      - '@logger.channel.custom_webform_handlers'
+      - '@datetime.time'
+      - false
+
+  # Provider adapters remain private behind purpose-specific chains.
+  custom_webform_handlers.osrm_distance_provider:
+    class: Drupal\custom_webform_handlers\Distance\OsrmDistanceProvider
+    arguments:
+      - '@http_client'
+      - '@custom_webform_handlers.address_coordinate_resolver'
+      - '@config.factory'
+      - '@settings'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.mapbox_distance_provider:
+    class: Drupal\custom_webform_handlers\Distance\MapboxDistanceProvider
+    arguments:
+      - '@http_client'
+      - '@custom_webform_handlers.address_coordinate_resolver'
+      - '@config.factory'
+      - '@settings'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
 
   custom_webform_handlers.distance_provider:
-    alias: custom_webform_handlers.google_routes_distance_provider
+    alias: custom_webform_handlers.distance_provider_chain.ordinary
+
+  # Purpose and provider eligibility are fixed by wiring, never request input.
+  custom_webform_handlers.distance_provider_chain.ordinary:
+    class: Drupal\custom_webform_handlers\Distance\ChainDistanceProvider
+    arguments:
+      - 'ordinary'
+      -
+        osrm: '@custom_webform_handlers.osrm_distance_provider'
+        mapbox: '@custom_webform_handlers.mapbox_distance_provider'
+      - '@config.factory'
+      - '@custom_webform_handlers.address_coordinate_resolver'
+      - '@custom_webform_handlers.route_cache'
+      - '@custom_webform_handlers.provider_circuit'
+      - '@custom_webform_handlers.routing_budget'
+      - '@custom_webform_handlers.routing_usage'
+      - '@request_stack'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.offer_distance_provider:
+    class: Drupal\custom_webform_handlers\Distance\ChainDistanceProvider
+    arguments:
+      - 'offer'
+      -
+        mapbox: '@custom_webform_handlers.mapbox_distance_provider'
+      - '@config.factory'
+      - '@custom_webform_handlers.address_coordinate_resolver'
+      - '@custom_webform_handlers.route_cache'
+      - '@custom_webform_handlers.provider_circuit'
+      - '@custom_webform_handlers.routing_budget'
+      - '@custom_webform_handlers.routing_usage'
+      - '@request_stack'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.final_distance_provider:
+    class: Drupal\custom_webform_handlers\Distance\ChainDistanceProvider
+    arguments:
+      - 'final'
+      -
+        mapbox: '@custom_webform_handlers.mapbox_distance_provider'
+        google_routes: '@custom_webform_handlers.google_routes_chain_provider'
+      - '@config.factory'
+      - '@custom_webform_handlers.address_coordinate_resolver'
+      - '@custom_webform_handlers.route_cache'
+      - '@custom_webform_handlers.provider_circuit'
+      - '@custom_webform_handlers.routing_budget'
+      - '@custom_webform_handlers.routing_usage'
+      - '@request_stack'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
 
   custom_webform_handlers.quote_calculator:
     class: Drupal\custom_webform_handlers\Quote\QuoteCalculator
@@ -95,22 +258,29 @@ services:
     arguments:
       - '@datetime.time'
 
-  # Route legs for scheduling. Wraps the existing distance provider rather than
-  # issuing its own Google requests, so quoting and scheduling continue to share
-  # exactly one route adapter.
-  #
-  # The provider is injected on the broad DistanceProviderInterface, not on the
-  # scheduled-route contract, deliberately: a provider that cannot answer a
-  # traffic-aware question must degrade to a conservative estimate rather than take
-  # the whole dispatch subsystem down with a container type error. The estimator
-  # reads the same route settings the provider does, for the margin it applies when
-  # that degradation happens.
-  custom_webform_handlers.dispatch_route_estimator:
+  # Public offers and warming use only the offer chain. Final checkout/staff
+  # decisions use a distinct instance of the same adapter over the final chain;
+  # the purpose string is trusted container input and participates in prepared
+  # fact validation.
+  custom_webform_handlers.dispatch_offer_route_estimator:
     class: Drupal\custom_webform_handlers\Dispatch\Route\DistanceProviderRouteEstimator
     arguments:
-      - '@custom_webform_handlers.distance_provider'
+      - '@custom_webform_handlers.offer_distance_provider'
       - '@config.factory'
       - '@logger.channel.custom_webform_handlers'
+      - 'offer'
+      - '@datetime.time'
+      - '@custom_webform_handlers.distance_provider'
+
+  custom_webform_handlers.dispatch_final_route_estimator:
+    class: Drupal\custom_webform_handlers\Dispatch\Route\DistanceProviderRouteEstimator
+    arguments:
+      - '@custom_webform_handlers.final_distance_provider'
+      - '@config.factory'
+      - '@logger.channel.custom_webform_handlers'
+      - 'final'
+      - '@datetime.time'
+      - '@custom_webform_handlers.distance_provider'
 
   # Dispatch identity and fact rebuilding. Both sit between the planner and the
   # request: the owner decides which session a Hold belongs to, and the request
@@ -165,7 +335,8 @@ services:
     arguments:
       - '@custom_webform_handlers.dispatch_eligibility'
       - '@custom_webform_handlers.dispatch_duration_policy'
-      - '@custom_webform_handlers.dispatch_route_estimator'
+      - '@custom_webform_handlers.dispatch_offer_route_estimator'
+      - '@custom_webform_handlers.dispatch_final_route_estimator'
       - '@custom_webform_handlers.dispatch_resource_schedule'
       - '@custom_webform_handlers.dispatch_reservation_store'
       - '@config.factory'
@@ -271,6 +442,10 @@ services:
   # customer books.
   custom_webform_handlers.dispatch_staff_planner:
     alias: custom_webform_handlers.dispatch_planner
+
+  # Checkout-only final routing seam. Public booking receives the visitor
+  # interface and therefore cannot select the final chain.
+  Drupal\custom_webform_handlers\Dispatch\DispatchCheckoutPlannerInterface: '@custom_webform_handlers.dispatch_planner'
 
   # Reported Resource Status. Insert-only storage for what staff observed, and wired
   # to nothing that plans: no planner, no calendar guard, no reservation store. A
@@ -382,7 +557,7 @@ services:
   custom_webform_handlers.dispatch_checkout_manager:
     class: Drupal\custom_webform_handlers\Commerce\DispatchCheckoutManager
     arguments:
-      - '@custom_webform_handlers.dispatch_planner'
+      - '@Drupal\custom_webform_handlers\Dispatch\DispatchCheckoutPlannerInterface'
       - '@custom_webform_handlers.dispatch_reservation_store'
       - '@custom_webform_handlers.dispatch_owner'
       - '@custom_webform_handlers.dispatch_request_factory'
@@ -413,9 +588,9 @@ services:
   # the validated contact email — and registers the resulting order in the cart
   # session so an anonymous customer keeps access to their own checkout. It decides
   # no capacity and holds no price of its own: the manager is the authority it hands
-  # those derived facts to. The distance provider is injected on the broad interface
-  # via the same alias quoting uses, so checkout-start recomputes the route through
-  # exactly one adapter, warm from the cache preSave populated.
+  # those derived facts to. Checkout uses the same Google provider as preview and
+  # preSave; its server cache verifies the unchanged pair without another billed
+  # request.
   #
   # Two doors, one authority. start() prices from the server's rate table;
   # startFromApprovedReview() prices from a Review Request row a staff form wrote,
@@ -429,7 +604,7 @@ services:
       - '@custom_webform_handlers.dispatch_request_factory'
       - '@custom_webform_handlers.dispatch_profile_factory'
       - '@custom_webform_handlers.quote_calculator'
-      - '@custom_webform_handlers.distance_provider'
+      - '@custom_webform_handlers.google_routes_distance_provider'
       - '@config.factory'
       - '@commerce_cart.cart_session'
       - '@entity_type.manager'
@@ -596,7 +771,7 @@ services:
     arguments:
       - '@custom_webform_handlers.dispatch_reservation_store'
       - '@custom_webform_handlers.dispatch_profile_factory'
-      - '@custom_webform_handlers.dispatch_route_estimator'
+      - '@custom_webform_handlers.dispatch_offer_route_estimator'
       - '@logger.channel.custom_webform_handlers'
 
   # The one thing a fresh install needs that configuration cannot carry.
@@ -613,4 +788,3 @@ services:
       - '@commerce_price.currency_importer'
       - '@config.factory'
       - '@logger.channel.custom_webform_handlers'
-

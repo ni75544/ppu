@@ -2,11 +2,13 @@
 
 namespace Drupal\custom_webform_handlers\Controller;
 
+use Drupal\Component\Datetime\TimeInterface;
 use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\DependencyInjection\ContainerInjectionInterface;
 use Drupal\Core\Flood\FloodInterface;
 use Drupal\custom_webform_handlers\Distance\DistanceProviderException;
 use Drupal\custom_webform_handlers\Distance\DistanceProviderInterface;
+use Drupal\custom_webform_handlers\Distance\DistanceResult;
 use Drupal\custom_webform_handlers\Plugin\WebformHandler\AddressDistanceHandler;
 use Drupal\custom_webform_handlers\Quote\QuoteCalculator;
 use Psr\Log\LoggerInterface;
@@ -19,24 +21,35 @@ use Symfony\Component\HttpFoundation\Request;
  */
 final class DistancePreviewController implements ContainerInjectionInterface {
 
+  /**
+   * Constructs the distance preview controller.
+   */
   public function __construct(
     private readonly DistanceProviderInterface $distanceProvider,
     private readonly FloodInterface $flood,
     private readonly ConfigFactoryInterface $configFactory,
     private readonly LoggerInterface $logger,
     private readonly QuoteCalculator $quoteCalculator,
+    private readonly TimeInterface $time,
   ) {}
 
+  /**
+   * {@inheritdoc}
+   */
   public static function create(ContainerInterface $container) {
     return new static(
-      $container->get('custom_webform_handlers.distance_provider'),
+      $container->get('custom_webform_handlers.google_routes_distance_provider'),
       $container->get('flood'),
       $container->get('config.factory'),
       $container->get('logger.channel.custom_webform_handlers'),
       $container->get('custom_webform_handlers.quote_calculator'),
+      $container->get('datetime.time'),
     );
   }
 
+  /**
+   * Returns a throttled preliminary quote for one address pair.
+   */
   public function preview(Request $request): JsonResponse {
     if (strlen((string) $request->getContent()) > 4096) {
       return $this->response(['status' => 'error', 'code' => 'invalid_request'], 413);
@@ -49,8 +62,8 @@ final class DistancePreviewController implements ContainerInjectionInterface {
       return $this->response(['status' => 'error', 'code' => 'invalid_request'], 400);
     }
 
-    $origin = trim((string) ($data['origin'] ?? ''));
-    $destination = trim((string) ($data['destination'] ?? ''));
+    $origin = $this->normalizeAddressText((string) ($data['origin'] ?? ''));
+    $destination = $this->normalizeAddressText((string) ($data['destination'] ?? ''));
     if ($origin === '' || $destination === '' || mb_strlen($origin) > 500 || mb_strlen($destination) > 500) {
       return $this->response(['status' => 'error', 'code' => 'invalid_address'], 400);
     }
@@ -65,7 +78,8 @@ final class DistancePreviewController implements ContainerInjectionInterface {
     $this->flood->register($event, 3600, $identifier);
 
     try {
-      $result = $this->distanceProvider->calculate($origin, $destination);
+      $result = $this->reusableDistance($data, $origin, $destination)
+        ?? $this->distanceProvider->calculate($origin, $destination);
       $quote_input = $this->sanitizeQuoteInput($data['quote_input'] ?? []);
       $quote = $this->quoteCalculator->calculate($quote_input, $result);
       return $this->response([
@@ -73,6 +87,7 @@ final class DistancePreviewController implements ContainerInjectionInterface {
         'distance' => $result->toArray(),
         'quote' => $quote->toArray(),
         'authoritative' => FALSE,
+        'fingerprint' => $this->pairFingerprint($origin, $destination),
       ]);
     }
     catch (DistanceProviderException $exception) {
@@ -81,6 +96,100 @@ final class DistancePreviewController implements ContainerInjectionInterface {
     }
   }
 
+  /**
+   * Rebuilds the non-authoritative quote from this session's stored route fact.
+   *
+   * The browser may use this only for preview presentation. Submission still
+   * recalculates through GoogleRoutesDistanceProvider, whose server cache makes
+   * that verification free for an unchanged pair.
+   */
+  private function reusableDistance(
+    array $data,
+    string $origin,
+    string $destination,
+  ): ?DistanceResult {
+    $distance = $data['cached_distance'] ?? NULL;
+    $fingerprint = $data['route_fingerprint'] ?? NULL;
+    if (!is_array($distance)
+      || !is_string($fingerprint)
+      || !hash_equals(
+        $this->pairFingerprint($origin, $destination),
+        $fingerprint,
+      )) {
+      return NULL;
+    }
+
+    $meters = filter_var(
+      $distance['distance_meters'] ?? NULL,
+      FILTER_VALIDATE_INT,
+    );
+    $seconds = filter_var(
+      $distance['duration_seconds'] ?? NULL,
+      FILTER_VALIDATE_INT,
+    );
+    $calculated = filter_var(
+      $distance['calculated_at'] ?? NULL,
+      FILTER_VALIDATE_INT,
+    );
+    if (($distance['provider'] ?? '') !== 'google_routes'
+      || $meters === FALSE || $meters < 1 || $meters > 5000000
+      || $seconds === FALSE || $seconds < 1 || $seconds > 604800
+      || $calculated === FALSE) {
+      return NULL;
+    }
+
+    $ttl = max(60, min(86400, (int) ($this->configFactory
+      ->get('custom_webform_handlers.settings')
+      ->get('route_cache_ttl') ?: 3600)));
+    $now = $this->time->getCurrentTime();
+    if ($calculated > $now + 60 || $calculated < $now - $ttl) {
+      return NULL;
+    }
+
+    return new DistanceResult(
+      $meters,
+      $seconds,
+      'google_routes',
+      $calculated,
+    );
+  }
+
+  /**
+   * Collapses an address to the text the route cache is keyed on.
+   *
+   * The route provider's own cache identity already lowercases both endpoints,
+   * but it does not collapse whitespace or comma spacing — so "123 Main St,
+   * Springfield" and "123 Main St,Springfield" miss each other and buy the same
+   * journey twice, from any number of browsers. Normalizing here feeds the
+   * existing cache rather than adding a second one.
+   *
+   * This is semantically neutral for address resolution and invisible to the
+   * response: DistanceResult carries distances, not the addresses it was asked
+   * about. Case is deliberately left alone for the provider request; the shared
+   * fingerprint helper folds it when identity, rather than display, is needed.
+   */
+  private function normalizeAddressText(string $value): string {
+    return DistanceResult::normalizeAddressText($value);
+  }
+
+  /**
+   * The identity of one ordered address pair.
+   *
+   * Echoed so a client, a log line, or an operator reading a response can say
+   * which journey was priced without repeating the address. A route is
+   * directional, so the pair is ordered and A to B never collides with B to A.
+   *
+   * A hash organizes identity. It is not anonymization and confers no licensing
+   * right over the addresses it was computed from, and it is returned only to
+   * the client that supplied them.
+   */
+  private function pairFingerprint(string $origin, string $destination): string {
+    return DistanceResult::pairFingerprint($origin, $destination);
+  }
+
+  /**
+   * Builds a private, non-cacheable JSON response.
+   */
   private function response(array $data, int $status = 200): JsonResponse {
     $response = new JsonResponse($data, $status);
     $response->headers->set('Cache-Control', 'no-store, private');

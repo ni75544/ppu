@@ -170,6 +170,13 @@
     summary.setAttribute('data-route-map-summary', '');
     region.appendChild(summary);
 
+    const attribution = element(
+      'p',
+      'custom-route-map-preview__attribution',
+    );
+    attribution.setAttribute('data-route-map-attribution', '');
+    region.appendChild(attribution);
+
     const canvas = element('div', 'custom-route-map-preview__canvas');
     canvas.setAttribute('data-route-map-canvas', '');
     // An interactive, pannable surface. Google's own map container provides the
@@ -196,6 +203,7 @@
     const region = buildRegion(form, config.webform_id || 'webform');
     const status = region.querySelector('[data-route-map-status]');
     const summary = region.querySelector('[data-route-map-summary]');
+    const attribution = region.querySelector('[data-route-map-attribution]');
     const canvas = region.querySelector('[data-route-map-canvas]');
 
     let map = null;
@@ -209,6 +217,29 @@
 
     function setSummary(message) {
       summary.textContent = message;
+    }
+
+    function setAttribution(provider) {
+      attribution.replaceChildren();
+      if (provider === 'osrm') {
+        attribution.appendChild(
+          document.createTextNode(Drupal.t('Routing data © ')),
+        );
+        const link = element('a', '', Drupal.t('OpenStreetMap contributors'));
+        link.href = 'https://www.openstreetmap.org/copyright';
+        link.rel = 'noopener noreferrer';
+        link.target = '_blank';
+        attribution.appendChild(link);
+      } else if (provider === 'mapbox') {
+        attribution.appendChild(
+          document.createTextNode(Drupal.t('Route supplied by ')),
+        );
+        const link = element('a', '', 'Mapbox');
+        link.href = 'https://www.mapbox.com/about/maps/';
+        link.rel = 'noopener noreferrer';
+        link.target = '_blank';
+        attribution.appendChild(link);
+      }
     }
 
     function distanceLabel(distance) {
@@ -315,6 +346,7 @@
       region.hidden = true;
       setStatus('');
       setSummary('');
+      setAttribution('');
     }
 
     function displayRoute(detail) {
@@ -328,6 +360,11 @@
         typeof route.encodedPolyline === 'string' && route.encodedPolyline
           ? route.encodedPolyline
           : (route.distance && route.distance.encoded_polyline) || '';
+      const provider = String(
+        route.distance && route.distance.provider
+          ? route.distance.provider
+          : '',
+      );
 
       const request = ++sequence;
       region.hidden = false;
@@ -339,6 +376,21 @@
           '@distance': distanceLabel(route.distance),
         }),
       );
+      setAttribution(provider);
+
+      // This component's drawing surface is Google Maps. Until the applicable
+      // provider terms explicitly permit mixing an OSRM or Mapbox overlay onto
+      // that surface, keep the numerical route and its attribution visible but
+      // do not silently display cross-provider geometry.
+      if (provider !== 'google_routes') {
+        clearOverlay();
+        setStatus(
+          Drupal.t('@distance. A map of this route is unavailable.', {
+            '@distance': distanceLabel(route.distance),
+          }),
+        );
+        return;
+      }
 
       if (!encoded) {
         // The route was validated but carries no geometry: text only. Any

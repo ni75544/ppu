@@ -30,6 +30,17 @@ custom_webform_handlers.dispatch_notification_settings:
   route_name: custom_webform_handlers.dispatch_notification_settings
   weight: 103
 
+# Sits with the other configuration links rather than under the quote settings, even
+# though both concern distance: the quote form owns what a mile costs, and this owns
+# who is asked how far a mile is. The description leads with cost because that is what
+# an operator comes here to change or to check.
+custom_webform_handlers.routing_provider_settings:
+  title: 'Routing Providers'
+  description: 'Choose which routing provider answers each purpose, and what each may spend per period. Reports whether a provider can be reached, without disclosing any credential.'
+  parent: system.admin_config_services
+  route_name: custom_webform_handlers.routing_provider_settings
+  weight: 104
+
 custom_webform_handlers.reservation_admin:
   title: 'Webform reservations'
   description: 'View, block, and release reserved time slots.'

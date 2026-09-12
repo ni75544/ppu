@@ -40,6 +40,8 @@ final readonly class QuoteSnapshot {
   const MANUAL_REVIEW_STATUS = 'manual_review';
 
   /**
+   * Constructs one immutable server-authoritative price snapshot.
+   *
    * @param string $snapshotId
    *   A stable identifier for the priced figure, derived from the figure itself.
    *   It names what was quoted, not when: two attempts quoted identically share
@@ -50,12 +52,21 @@ final readonly class QuoteSnapshot {
    *   An upper-case ISO 4217 alphabetic code.
    * @param string $rateVersion
    *   Which rate table produced the figure, carried for audit.
+   * @param string $routeSource
+   *   The normalized provider that supplied the priced route, when automatic.
+   * @param string $routeFingerprint
+   *   A one-way identity for the exact normalized route result.
+   * @param int $routeCalculatedAt
+   *   When that result was originally calculated, in UTC.
    */
   private function __construct(
     public string $snapshotId,
     public int $amountCents,
     public string $currency,
     public string $rateVersion,
+    public string $routeSource,
+    public string $routeFingerprint,
+    public int $routeCalculatedAt,
   ) {}
 
   /**
@@ -66,12 +77,21 @@ final readonly class QuoteSnapshot {
    * reviewed job, a job priced at nothing, or a currency the site does not use.
    * None of them is a programming error, and none of them may become an order.
    */
-  public static function fromQuoteResult(QuoteResult $quote): ?self {
+  public static function fromQuoteResult(QuoteResult $quote, string $origin, string $destination): ?self {
     if ($quote->status() === self::MANUAL_REVIEW_STATUS) {
       return NULL;
     }
 
-    return self::build($quote->totalCents(), $quote->currency(), $quote->rateVersion());
+    $distance = $quote->distance();
+
+    return self::build(
+      $quote->totalCents(),
+      $quote->currency(),
+      $quote->rateVersion(),
+      $distance->provider(),
+      $distance->routeFingerprint($origin, $destination),
+      $distance->calculatedAt(),
+    );
   }
 
   /**
@@ -112,18 +132,41 @@ final readonly class QuoteSnapshot {
    * amount lost — must fail to reconstruct rather than resolve to zero and settle
    * a booking for nothing.
    */
-  public static function fromStored(?string $snapshotId, ?int $amountCents, ?string $currency, ?string $rateVersion): ?self {
+  public static function fromStored(
+    ?string $snapshotId,
+    ?int $amountCents,
+    ?string $currency,
+    ?string $rateVersion,
+    ?string $routeSource = NULL,
+    ?string $routeFingerprint = NULL,
+    ?int $routeCalculatedAt = NULL,
+  ): ?self {
     if ($snapshotId === NULL || trim($snapshotId) === '' || $amountCents === NULL || $currency === NULL) {
       return NULL;
     }
 
-    $rebuilt = self::build($amountCents, $currency, (string) $rateVersion);
+    $rebuilt = self::build(
+      $amountCents,
+      $currency,
+      (string) $rateVersion,
+      (string) $routeSource,
+      (string) $routeFingerprint,
+      (int) $routeCalculatedAt,
+    );
 
     // The stored identifier wins over a freshly derived one, so a snapshot keeps
     // the name it was written under even if the derivation is ever changed.
     return $rebuilt === NULL
       ? NULL
-      : new self(substr(trim($snapshotId), 0, 128), $rebuilt->amountCents, $rebuilt->currency, $rebuilt->rateVersion);
+      : new self(
+        substr(trim($snapshotId), 0, 128),
+        $rebuilt->amountCents,
+        $rebuilt->currency,
+        $rebuilt->rateVersion,
+        $rebuilt->routeSource,
+        $rebuilt->routeFingerprint,
+        $rebuilt->routeCalculatedAt,
+      );
   }
 
   /**
@@ -141,17 +184,49 @@ final readonly class QuoteSnapshot {
    * recompute it from the row. It is not a secret and proves nothing: it names a
    * price, and the store still re-proves feasibility before capacity moves.
    */
-  private static function build(int $amountCents, string $currency, string $rateVersion): ?self {
+  private static function build(
+    int $amountCents,
+    string $currency,
+    string $rateVersion,
+    string $routeSource = '',
+    string $routeFingerprint = '',
+    int $routeCalculatedAt = 0,
+  ): ?self {
     $currency = strtoupper(trim($currency));
     $rateVersion = trim($rateVersion);
+    $routeSource = trim($routeSource);
+    $routeFingerprint = strtolower(trim($routeFingerprint));
+
+    if ($routeSource !== '' && preg_match('/^[a-z0-9_]{1,64}$/D', $routeSource) !== 1) {
+      $routeSource = '';
+    }
+    if ($routeFingerprint !== '' && preg_match('/^[a-f0-9]{64}$/D', $routeFingerprint) !== 1) {
+      $routeFingerprint = '';
+    }
+    $routeCalculatedAt = max(0, $routeCalculatedAt);
 
     if ($amountCents < 1 || preg_match('/^[A-Z]{3}$/', $currency) !== 1) {
       return NULL;
     }
 
-    $snapshotId = substr(hash('sha256', $amountCents . '|' . $currency . '|' . $rateVersion), 0, 32);
+    $snapshotId = substr(hash('sha256', implode('|', [
+      $amountCents,
+      $currency,
+      $rateVersion,
+      $routeSource,
+      $routeFingerprint,
+      $routeCalculatedAt,
+    ])), 0, 32);
 
-    return new self($snapshotId, $amountCents, $currency, substr($rateVersion, 0, 64));
+    return new self(
+      $snapshotId,
+      $amountCents,
+      $currency,
+      substr($rateVersion, 0, 64),
+      $routeSource,
+      $routeFingerprint,
+      $routeCalculatedAt,
+    );
   }
 
 }

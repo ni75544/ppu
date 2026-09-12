@@ -2,11 +2,13 @@
 
 namespace Drupal\custom_webform_handlers\Distance;
 
+use Drupal\Component\Datetime\TimeInterface;
 use Drupal\Core\Cache\CacheBackendInterface;
 use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Config\ImmutableConfig;
 use Drupal\Core\Site\Settings;
 use GuzzleHttp\ClientInterface;
+use GuzzleHttp\Exception\ConnectException;
 use GuzzleHttp\RequestOptions;
 use Psr\Log\LoggerInterface;
 
@@ -95,6 +97,8 @@ final class GoogleRoutesDistanceProvider implements DistanceProviderInterface, S
     private readonly CacheBackendInterface $cache,
     private readonly ConfigFactoryInterface $configFactory,
     private readonly LoggerInterface $logger,
+    private readonly ?TimeInterface $time = NULL,
+    private readonly bool $internalCacheEnabled = TRUE,
   ) {}
 
   /**
@@ -136,12 +140,12 @@ final class GoogleRoutesDistanceProvider implements DistanceProviderInterface, S
     $origin = $this->normalizeAddress($origin);
     $destination = $this->normalizeAddress($destination);
     if ($origin === '' || $destination === '' || $origin === $destination) {
-      throw new DistanceProviderException('invalid_route_input');
+      throw DistanceProviderException::classified(DistanceProviderException::ADDRESS_UNUSABLE, 'google_routes');
     }
 
     $api_key = (string) Settings::get('custom_webform_handlers_server_api_key', '');
     if ($api_key === '') {
-      throw new DistanceProviderException('provider_not_configured');
+      throw DistanceProviderException::classified(DistanceProviderException::NOT_CONFIGURED, 'google_routes');
     }
 
     $config = $this->configFactory->get('custom_webform_handlers.settings');
@@ -151,16 +155,23 @@ final class GoogleRoutesDistanceProvider implements DistanceProviderInterface, S
     $departure = $scheduled ? $this->departureInstant($config, (int) $departureAt) : 0;
 
     $cid = $this->cacheIdentity($origin, $destination, $preference, $model, $departure);
-    if ($cached = $this->cache->get($cid)) {
+    if ($this->internalCacheEnabled && ($cached = $this->cache->get($cid))) {
       $data = $cached->data;
-      return new DistanceResult(
-        (int) $data['distance_meters'],
-        (int) $data['duration_seconds'],
-        'google_routes',
-        NULL,
-        isset($data['encoded_polyline']) ? (string) $data['encoded_polyline'] : NULL,
-        !empty($data['traffic_aware']),
-      );
+      // Older entries did not retain fetch provenance. Leave them untouched,
+      // but refresh this pair once instead of inventing an original timestamp.
+      if (is_array($data) && isset($data['calculated_at'], $data['metadata'])
+        && is_int($data['calculated_at']) && $data['calculated_at'] > 0
+        && is_array($data['metadata'])) {
+        return DistanceResult::restored(
+          (int) $data['distance_meters'],
+          (int) $data['duration_seconds'],
+          'google_routes',
+          $data['calculated_at'],
+          $data['metadata'],
+          isset($data['encoded_polyline']) ? (string) $data['encoded_polyline'] : NULL,
+          !empty($data['traffic_aware']),
+        );
+      }
     }
 
     $timeout = max(2, min(20, (int) ($config->get('route_request_timeout') ?: 8)));
@@ -191,11 +202,13 @@ final class GoogleRoutesDistanceProvider implements DistanceProviderInterface, S
       $payload['trafficModel'] = $model;
     }
 
+    $fetched_at = $this->now();
     try {
       $response = $this->httpClient->request('POST', self::ENDPOINT, [
         RequestOptions::CONNECT_TIMEOUT => min(5, $timeout),
         RequestOptions::TIMEOUT => $timeout,
         RequestOptions::HTTP_ERRORS => FALSE,
+        RequestOptions::ALLOW_REDIRECTS => FALSE,
         RequestOptions::HEADERS => [
           'Content-Type' => 'application/json',
           'X-Goog-Api-Key' => $api_key,
@@ -207,16 +220,38 @@ final class GoogleRoutesDistanceProvider implements DistanceProviderInterface, S
       $status = $response->getStatusCode();
       if ($status < 200 || $status >= 300) {
         $this->logger->warning('Routes API returned HTTP status @status.', ['@status' => $status]);
-        throw new DistanceProviderException('provider_request_failed');
+        $classification = match ($status) {
+          401, 403, 404 => DistanceProviderException::NOT_CONFIGURED,
+          408, 504 => DistanceProviderException::TIMEOUT,
+          429 => DistanceProviderException::THROTTLED,
+          default => DistanceProviderException::UNCLASSIFIED,
+        };
+        $retry = trim($response->getHeaderLine('Retry-After'));
+        throw DistanceProviderException::classified($classification, 'google_routes',
+          $status === 429 && ctype_digit($retry) ? min(86400, (int) $retry) : NULL);
       }
 
       $data = json_decode((string) $response->getBody(), TRUE, 512, JSON_THROW_ON_ERROR);
+      if (!is_array($data) || (isset($data['routes']) && !is_array($data['routes']))) {
+        throw DistanceProviderException::classified(DistanceProviderException::MALFORMED_RESPONSE, 'google_routes');
+      }
       $route = $data['routes'][0] ?? NULL;
-      $distance_meters = (int) ($route['distanceMeters'] ?? 0);
-      $duration_seconds = $this->parseDuration((string) ($route['duration'] ?? '0s'));
-      $encoded_polyline = trim((string) ($route['polyline']['encodedPolyline'] ?? ''));
-      if ($distance_meters <= 0) {
-        throw new DistanceProviderException('route_not_found');
+      if ($route === NULL) {
+        throw DistanceProviderException::classified(DistanceProviderException::NO_ROUTE, 'google_routes');
+      }
+      if (!is_array($route) || !is_int($route['distanceMeters'] ?? NULL)
+        || $route['distanceMeters'] < 0 || !is_string($route['duration'] ?? NULL)) {
+        throw DistanceProviderException::classified(DistanceProviderException::MALFORMED_RESPONSE, 'google_routes');
+      }
+      $distance_meters = $route['distanceMeters'];
+      $duration_seconds = $this->parseDuration($route['duration'], $scheduled);
+      $encoded_polyline = $route['polyline']['encodedPolyline'] ?? '';
+      if (!is_string($encoded_polyline)) {
+        throw DistanceProviderException::classified(DistanceProviderException::MALFORMED_RESPONSE, 'google_routes');
+      }
+      $encoded_polyline = trim($encoded_polyline);
+      if ($distance_meters === 0) {
+        throw DistanceProviderException::classified(DistanceProviderException::NO_ROUTE, 'google_routes');
       }
 
       $traffic_aware = FALSE;
@@ -224,14 +259,19 @@ final class GoogleRoutesDistanceProvider implements DistanceProviderInterface, S
         // Never below the traffic-free time. A scheduled duration under the
         // free-flow one would say traffic made the drive quicker than an empty
         // road; the higher of the two is the only figure worth planning against.
-        $static_seconds = $this->parseDuration((string) ($route['staticDuration'] ?? '0s'));
+        if (!is_string($route['staticDuration'] ?? NULL)) {
+          throw DistanceProviderException::classified(DistanceProviderException::MALFORMED_RESPONSE, 'google_routes');
+        }
+        $static_seconds = $this->parseDuration($route['staticDuration'], TRUE);
         $duration_seconds = max($duration_seconds, $static_seconds);
 
         // Google reports a substituted routing preference rather than failing, so
         // a traffic-aware request can succeed and still return a traffic-free
         // duration. Believing the request instead of the response here is exactly
         // how a schedule comes to be built on peak-hour optimism.
-        $traffic_aware = ((string) ($data['fallbackInfo']['routingMode'] ?? '')) !== self::FALLBACK_UNAWARE;
+        $fallback = $data['fallbackInfo'] ?? NULL;
+        $traffic_aware = $fallback === NULL || (is_array($fallback)
+          && ($fallback['routingMode'] ?? '') === 'FALLBACK_TRAFFIC_AWARE');
         if (!$traffic_aware) {
           $this->logger->warning('Routes API substituted traffic-unaware routing, so this scheduled duration carries no traffic.');
         }
@@ -239,7 +279,7 @@ final class GoogleRoutesDistanceProvider implements DistanceProviderInterface, S
         if ($duration_seconds <= 0) {
           // A length with no time is not a schedulable answer, and passing zero
           // back would read as "no travel time at all" to the planner.
-          throw new DistanceProviderException('route_not_found');
+          throw DistanceProviderException::classified(DistanceProviderException::NO_ROUTE, 'google_routes');
         }
       }
 
@@ -247,28 +287,57 @@ final class GoogleRoutesDistanceProvider implements DistanceProviderInterface, S
         ? max(60, min(3600, (int) ($config->get('route_scheduled_cache_ttl') ?: 900)))
         : max(60, min(86400, (int) ($config->get('route_cache_ttl') ?: 3600)));
 
-      $this->cache->set($cid, [
-        'distance_meters' => $distance_meters,
-        'duration_seconds' => $duration_seconds,
-        'encoded_polyline' => $encoded_polyline,
-        'traffic_aware' => $traffic_aware,
-      ], time() + $ttl);
+      $metadata = [
+        'fetched_at' => $fetched_at,
+        'expires_at' => $fetched_at + $ttl,
+        'provider_version' => 'routes-v2',
+        'profile' => $preference,
+        'effective_departure_at' => $scheduled ? $departure : NULL,
+      ];
+      if ($this->internalCacheEnabled) {
+        try {
+          $this->cache->set($cid, [
+            'distance_meters' => $distance_meters,
+            'duration_seconds' => $duration_seconds,
+            'encoded_polyline' => $encoded_polyline,
+            'traffic_aware' => $traffic_aware,
+            'calculated_at' => $fetched_at,
+            'metadata' => $metadata,
+          ], $fetched_at + $ttl);
+        }
+        catch (\Throwable) {
+          // A cache-write failure must not turn a successful billed route into
+          // another paid fallback attempt. The result itself remains usable.
+          $this->logger->warning('Routes API result could not be cached.');
+        }
+      }
 
       return new DistanceResult(
         $distance_meters,
         $duration_seconds,
         'google_routes',
-        NULL,
+        $fetched_at,
         $encoded_polyline,
         $traffic_aware,
+        $metadata,
       );
     }
     catch (DistanceProviderException $exception) {
       throw $exception;
     }
+    catch (ConnectException $exception) {
+      throw DistanceProviderException::classified(
+        ($exception->getHandlerContext()['errno'] ?? 0) === 28
+          ? DistanceProviderException::TIMEOUT : DistanceProviderException::UNCLASSIFIED,
+        'google_routes',
+      );
+    }
+    catch (\JsonException) {
+      throw DistanceProviderException::classified(DistanceProviderException::MALFORMED_RESPONSE, 'google_routes');
+    }
     catch (\Throwable $exception) {
       $this->logger->error('Routes API request failed: @type', ['@type' => get_class($exception)]);
-      throw new DistanceProviderException('provider_request_failed', 0, $exception);
+      throw DistanceProviderException::classified(DistanceProviderException::UNCLASSIFIED, 'google_routes');
     }
   }
 
@@ -328,14 +397,7 @@ final class GoogleRoutesDistanceProvider implements DistanceProviderInterface, S
    *   A future, bucket-aligned UNIX timestamp.
    */
   private function departureInstant(ImmutableConfig $config, int $departureAt): int {
-    $bucket = max(60, min(3600, (int) ($config->get('route_departure_bucket_seconds') ?: 1800)));
-    $lead = max(0, min(3600, (int) ($config->get('route_departure_min_lead_seconds') ?: 60)));
-    $floor = time() + $lead;
-
-    $instant = max($departureAt, $floor);
-    $aligned = intdiv($instant, $bucket) * $bucket;
-
-    return $aligned < $floor ? $aligned + $bucket : $aligned;
+    return RoutingPolicy::effectiveDeparture($config, $departureAt, $this->now());
   }
 
   /**
@@ -371,15 +433,31 @@ final class GoogleRoutesDistanceProvider implements DistanceProviderInterface, S
     return $model;
   }
 
+  /**
+   * Normalizes whitespace without changing Google's address interpretation.
+   */
   private function normalizeAddress(string $address): string {
     return trim((string) preg_replace('/\s+/u', ' ', $address));
   }
 
-  private function parseDuration(string $duration): int {
+  /**
+   * Parses Google's duration format, rounding scheduling durations upward.
+   */
+  private function parseDuration(string $duration, bool $roundUp = FALSE): int {
     if (preg_match('/^([0-9]+(?:\.[0-9]+)?)s$/', $duration, $matches)) {
-      return (int) round((float) $matches[1]);
+      $seconds = (float) $matches[1];
+      if (is_finite($seconds) && $seconds <= 2147483647) {
+        return (int) ($roundUp ? ceil($seconds) : round($seconds));
+      }
     }
-    return 0;
+    throw DistanceProviderException::classified(DistanceProviderException::MALFORMED_RESPONSE, 'google_routes');
+  }
+
+  /**
+   * Uses the injected clock; optional to preserve existing direct construction.
+   */
+  private function now(): int {
+    return $this->time?->getCurrentTime() ?? time();
   }
 
 }

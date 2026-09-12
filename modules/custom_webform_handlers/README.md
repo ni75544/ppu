@@ -1,6 +1,6 @@
 # Custom Webform Handlers
 
-Current calculator release: `1.1.10`; rate version: `2026-08-production-v1`.
+Current calculator release: `1.1.14`; rate version: `2026-08-production-v1`.
 
 Step 16 clears all computed quote fields before authoritative recalculation, prevents stale totals after route/provider failures, stores classified manual-review metadata, disables caching of preview responses, and reports key/rate readiness in Drupal's Status Report.
 
@@ -21,7 +21,8 @@ Configure two new restricted keys:
 
 1. Enter the browser key at **Configuration > Web services > Google API
    Settings**. Restrict it by the site's HTTP referrers and required browser
-   APIs.
+   APIs, then enable Google Places address suggestions only after the Cloud
+   project passes its billing and restriction checks.
 2. Set the server key outside configuration export in `settings.php`:
 
    ```php
@@ -40,6 +41,14 @@ example `https://example.com/*` and `https://www.example.com/*` when both
 hostnames are used. Allow several minutes after changing Google Cloud settings,
 then rebuild Drupal caches and reload the form without the browser cache.
 
+Google address suggestions are optional. When they are disabled, the public
+form loads no Google Maps script. The normal Webform controls instead receive
+text-only suggestions from the approved self-hosted Nominatim provider; the
+browser never receives provider coordinates, and distance and price previews
+still resolve the selected text server-side before routing it through OSRM. The
+stored browser key is preserved so the Google integration can be re-enabled
+after the Google Cloud project is ready.
+
 If suggestions still do not appear, inspect the browser developer console.
 This build reports initialization errors without exposing the key and allows
 address autocomplete to initialize even when the distance-preview mapping is
@@ -56,6 +65,12 @@ Version 1.1.3 also waits for the Places interface after the asynchronous Google
 script load event. Google may finish loading the script before `importLibrary()`
 and the Places namespace have been exposed, so the script event alone is not
 treated as readiness.
+
+Version 1.1.14 keeps the Webform's own address input as the primary autocomplete
+control whenever Google exposes the compatible input-bound widget. Typed text is
+therefore the value Drupal validates and submits. Where only the modern custom
+element is available, its selected prediction is copied synchronously before
+Place Details loads, and a Google widget error restores the normal text input.
 
 ## Handler setup
 
@@ -86,11 +101,15 @@ Distance Record entity code, and the hardcoded `we` Webform hooks. It does not
 drop an existing `distance_record` database table because that could destroy
 historical data. Back up and review any existing table separately.
 
-Distance preview and final submission validation now use Google Routes API v2
-on the server. The browser no longer calculates distance with the legacy
-Distance Matrix service. Existing Twig pricing remains only as a temporary
-display layer; the authoritative stored total is calculated by the PHP quote
-service. The next Webform YAML phase will replace that Twig pricing display.
+Committed address pairs now use the purpose-specific server routing chain. The
+current local rollout sends ordinary quote and preview routing to the private
+OSRM service; raw typing does not request a route. Traffic-aware offer and final
+checks fail closed until an approved traffic provider has been configured with
+a non-zero allowance. Google Routes is restricted to the validated final chain
+and is never an automatic preview fallback. The browser no longer calculates
+distance with the legacy Distance Matrix service. Existing Twig pricing remains
+only as a temporary display layer; the authoritative stored total is calculated
+by the PHP quote service.
 
 All migrated rates are provisional copies of the supplied form values. Review
 and approve them before production use.
@@ -98,6 +117,9 @@ and approve them before production use.
 Administrators can review route limits and quote rates at **Configuration >
 Web services > Shipping Quote Settings**. Monetary settings are stored in
 cents. Increment the rate version whenever approved production rates change.
+Provider eligibility, allowances, local usage counters, and circuit state are
+available separately at **Configuration > Web services > Routing Providers** to
+users with the `administer routing providers` permission.
 
 ## Express Courier setup
 
@@ -385,3 +407,15 @@ documented under `docs/operations/`:
 - [Dispatch background workers](../../docs/operations/dispatch-workers.md) — the
   Advanced Queue queues, the ECA reaction layer, and what does and does not happen
   when a worker or Redis is down.
+- [Routing cost rollout](docs/operations/routing-cost-rollout.md) — the pinned
+  private OSRM generation, local-only activation state, usage visibility, and
+  guarded provider enablement procedure.
+- [Routing cost rollback](docs/operations/routing-cost-rollback.md) — disabling
+  routing or restoring the known-good generation without enabling an uncapped
+  paid fallback or deleting operational data.
+- [Task 20 routing acceptance](docs/releases/task20-routing-acceptance.md) — the
+  bounded acceptance matrix, observed local counters, and explicit pending
+  production/browser/payment checks.
+- [Address input validation fix](docs/releases/address-input-validation-fix.md)
+  — the duplicated autocomplete/Webform control diagnosis, browser reproduction,
+  corrective behavior, and bounded verification.

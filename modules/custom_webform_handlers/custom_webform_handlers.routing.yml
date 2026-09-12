@@ -14,6 +14,25 @@ custom_webform_handlers.quote_settings:
   requirements:
     _permission: 'administer site configuration'
 
+# Which routing provider answers which question, and what it is allowed to spend.
+# Gated on its own restricted permission rather than on site configuration, because
+# what is decided here is a bill: an order that names a metered provider for the
+# form's distance preview costs money on every keystroke, and an allowance raised by
+# one digit is a tenfold increase. Nothing on this page changes a tariff, so the
+# quote settings permission is not the right one either.
+#
+# The single permission is deliberate — 'administer site configuration' is not
+# accepted alongside it. A site builder who may install modules is not, by that
+# fact, a person who may commit this site to per-request spending, and this route is
+# new, so no existing configuration grant is being taken away by leaving it out.
+custom_webform_handlers.routing_provider_settings:
+  path: '/admin/config/services/custom-webform-handlers/routing'
+  defaults:
+    _form: '\Drupal\custom_webform_handlers\Form\RoutingProviderSettingsForm'
+    _title: 'Routing providers'
+  requirements:
+    _permission: 'administer routing providers'
+
 # The Dispatch Planner operating profile. Gated on its own narrower permission
 # rather than site configuration, because schedulers own this policy.
 custom_webform_handlers.dispatch_settings:
@@ -48,6 +67,17 @@ custom_webform_handlers.distance_preview:
   requirements:
     _access: 'TRUE'
     _csrf_request_header_token: 'TRUE'
+
+# A narrow public proxy for the single approved self-hosted geocoder. The
+# provider is fixed in the injected resolver; callers cannot select a plugin or
+# obtain coordinates from this route.
+custom_webform_handlers.address_suggestions:
+  path: '/custom-webform-handlers/address-suggestions'
+  defaults:
+    _controller: '\Drupal\custom_webform_handlers\Controller\AddressSuggestionController::suggest'
+  methods: [GET]
+  requirements:
+    _access: 'TRUE'
 
 # The Dispatch Planner booking endpoints. Four operations, no more: what is
 # offerable, claim one, extend the claim, give it up. Confirmation is deliberately

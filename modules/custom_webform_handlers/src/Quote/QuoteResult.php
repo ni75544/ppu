@@ -21,26 +21,54 @@ final class QuoteResult {
     private readonly string $weightSource = 'not_applicable',
   ) {}
 
+  /**
+   * Returns the quote currency.
+   */
   public function currency(): string {
     return $this->currency;
   }
 
+  /**
+   * Returns the authoritative total in minor currency units.
+   */
   public function totalCents(): int {
     return $this->totalCents;
   }
 
+  /**
+   * Returns the authoritative total as a decimal currency string.
+   */
   public function totalDecimal(): string {
     return number_format($this->totalCents / 100, 2, '.', '');
   }
 
+  /**
+   * Returns the quote disposition.
+   */
   public function status(): string {
     return $this->status;
   }
 
+  /**
+   * Returns the pricing configuration version.
+   */
   public function rateVersion(): string {
     return $this->rateVersion;
   }
 
+  /**
+   * Returns the normalized route fact this quote was calculated from.
+   */
+  public function distance(): DistanceResult {
+    return $this->distance;
+  }
+
+  /**
+   * Returns the public quote representation.
+   *
+   * @return array<string, mixed>
+   *   The normalized quote fields.
+   */
   public function toArray(): array {
     return [
       'currency' => $this->currency,

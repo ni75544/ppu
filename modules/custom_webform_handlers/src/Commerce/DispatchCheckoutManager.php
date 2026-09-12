@@ -19,7 +19,7 @@ use Drupal\custom_webform_handlers\Checkout\QuoteSnapshot;
 use Drupal\custom_webform_handlers\Dispatch\BookingWorkflow;
 use Drupal\custom_webform_handlers\Dispatch\BookingWorkflowGate;
 use Drupal\custom_webform_handlers\Dispatch\DispatchOwner;
-use Drupal\custom_webform_handlers\Dispatch\DispatchPlannerInterface;
+use Drupal\custom_webform_handlers\Dispatch\DispatchCheckoutPlannerInterface;
 use Drupal\custom_webform_handlers\Dispatch\DispatchReason;
 use Drupal\custom_webform_handlers\Dispatch\DispatchRequestFactory;
 use Drupal\custom_webform_handlers\Dispatch\Hold;
@@ -63,7 +63,7 @@ use Psr\Log\LoggerInterface;
 final class DispatchCheckoutManager implements DispatchCheckoutManagerInterface {
 
   public function __construct(
-    private readonly DispatchPlannerInterface $planner,
+    private readonly DispatchCheckoutPlannerInterface $planner,
     private readonly ReservationStoreInterface $store,
     private readonly DispatchOwner $owner,
     private readonly DispatchRequestFactory $requestFactory,
@@ -126,7 +126,7 @@ final class DispatchCheckoutManager implements DispatchCheckoutManagerInterface 
       return $repeat;
     }
 
-    $held = $this->planner->createHold($request, $resolved);
+    $held = $this->planner->createCheckoutHold($request, $resolved);
     if (!$held->isHeld() || $held->hold === NULL) {
       // The planner's own refusal, passed through unchanged. It has already
       // decided grid alignment, working hours, repositioning, and contention, and
@@ -359,7 +359,7 @@ final class DispatchCheckoutManager implements DispatchCheckoutManagerInterface 
       return CheckoutOutcome::refused(DispatchReason::HoldNotFound);
     }
 
-    $result = $this->planner->confirmReservation($hold, $submission);
+    $result = $this->planner->confirmCheckoutReservation($hold, $submission);
     if (!$result->isConfirmed() || $result->reservationId === NULL) {
       // Give the Hold back first: whatever becomes of the money, the capacity this
       // request took returns to the calendar. release() is ownership-checked and

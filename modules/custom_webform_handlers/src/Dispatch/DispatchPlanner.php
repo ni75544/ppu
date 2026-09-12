@@ -7,6 +7,7 @@ use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\custom_webform_handlers\Dispatch\Policy\DispatchEligibilityInterface;
 use Drupal\custom_webform_handlers\Dispatch\Policy\ServiceDurationPolicyInterface;
 use Drupal\custom_webform_handlers\Dispatch\Route\DispatchRouteEstimatorInterface;
+use Drupal\custom_webform_handlers\Dispatch\Route\PreparedRouteFacts;
 use Drupal\custom_webform_handlers\Dispatch\Schedule\ResourceScheduleInterface;
 use Drupal\custom_webform_handlers\Dispatch\Storage\DispatchReplan;
 use Drupal\custom_webform_handlers\Dispatch\Storage\LockedHold;
@@ -51,7 +52,7 @@ use Psr\Log\LoggerInterface;
  * it changes exactly one answer: which eligibility assessment is read. Nothing
  * physical about a vehicle or a day is relaxed for anybody.
  */
-final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPlannerInterface {
+final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPlannerInterface, DispatchCheckoutPlannerInterface {
 
   /**
    * The operating profile.
@@ -77,21 +78,11 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    */
   const MAX_GRID_CANDIDATES = 400;
 
-  /**
-   * Upper bound on route lookups one claim or confirmation may issue.
-   *
-   * A single candidate needs the service leg, the inbound leg, and the outbound
-   * leg: three pairs, memoized. The bound exists because confirmation runs its
-   * revalidation inside the storage seam's transaction, where the seam requires
-   * the callback to be bounded, and a bound stated as a constant is one that can
-   * be checked rather than assumed.
-   */
-  const MAX_CLAIM_ROUTE_LOOKUPS = 3;
-
   public function __construct(
     private readonly DispatchEligibilityInterface $eligibility,
     private readonly ServiceDurationPolicyInterface $durationPolicy,
-    private readonly DispatchRouteEstimatorInterface $routeEstimator,
+    private readonly DispatchRouteEstimatorInterface $offerRouteEstimator,
+    private readonly DispatchRouteEstimatorInterface $finalRouteEstimator,
     private readonly ResourceScheduleInterface $schedule,
     private readonly ReservationStoreInterface $store,
     private readonly ConfigFactoryInterface $configFactory,
@@ -174,8 +165,8 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     }
 
     // 6. Route legs. At most three per invocation, memoized below.
-    $legs = [];
-    $serviceLeg = $this->routeLeg($legs, $request->pickupAddress, $request->deliveryAddress, $day->workStart);
+    $facts = new PreparedRouteFacts();
+    $serviceLeg = $this->routeLeg($facts, $this->offerRouteEstimator, $request->pickupAddress, $request->deliveryAddress, $day->workStart, TRUE);
     if ($serviceLeg === NULL) {
       // Without the pickup-to-delivery leg there is no Dispatch Window to place.
       return [];
@@ -184,7 +175,7 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     $depot = trim($profile->depotAddress);
     $depotLeg = NULL;
     if ($depot !== '') {
-      $depotLeg = $this->routeLeg($legs, $depot, $request->pickupAddress, $day->workStart);
+      $depotLeg = $this->routeLeg($facts, $this->offerRouteEstimator, $depot, $request->pickupAddress, $day->workStart, TRUE);
       if ($depotLeg === NULL) {
         // The first job of the day departs from the depot. Unable to price that
         // leg, the planner cannot prove any candidate is reachable.
@@ -196,7 +187,7 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     if ($profile->returnToBase) {
       // Guaranteed non-empty: requiresDepotConfiguration() already refused
       // return-to-base without a depot.
-      $returnLeg = $this->routeLeg($legs, $request->deliveryAddress, $depot, $day->workEnd);
+      $returnLeg = $this->routeLeg($facts, $this->offerRouteEstimator, $request->deliveryAddress, $depot, $day->workEnd, TRUE);
       if ($returnLeg === NULL) {
         return [];
       }
@@ -233,7 +224,14 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    * {@inheritdoc}
    */
   public function createHold(DispatchRequest $request, Slot $slot): HoldResult {
-    return $this->createHoldFor($request, $slot, PlanAuthority::Visitor);
+    return $this->createHoldFor($request, $slot, PlanAuthority::Visitor, $this->offerRouteEstimator);
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function createCheckoutHold(DispatchRequest $request, Slot $slot): HoldResult {
+    return $this->createHoldFor($request, $slot, PlanAuthority::Visitor, $this->finalRouteEstimator);
   }
 
   /**
@@ -253,7 +251,12 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    * for the moments it exists, and is released rather than left to lapse if the
    * confirmation that follows it does not complete.
    */
-  private function createHoldFor(DispatchRequest $request, Slot $slot, PlanAuthority $authority): HoldResult {
+  private function createHoldFor(
+    DispatchRequest $request,
+    Slot $slot,
+    PlanAuthority $authority,
+    DispatchRouteEstimatorInterface $estimator,
+  ): HoldResult {
     // 1. Does dispatch own this Webform at all?
     //
     // A Webform still running the older fixed-slot workflow is refused here, so
@@ -304,7 +307,7 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     // Advisory at this point: the guard rows are not held yet, so everything read
     // here can change before the claim is written. It is derived now because the
     // storage seam needs a candidate to know which days to lock.
-    $plan = $this->planFor($request, $slot, $profile, NULL, $authority);
+    $plan = $this->preparePlanFor($request, $slot, $profile, NULL, $authority, $estimator);
     if ($plan instanceof DispatchReason) {
       return HoldResult::refused($plan);
     }
@@ -312,10 +315,10 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     // 5. Claim it, re-deriving the same plan while the guard rows are locked.
     //
     // The pre-transaction plan is never claimed on its own authority. Under the
-    // locks the neighbours are re-read, both repositioning legs are re-routed, and
-    // the claim is written only if the window and the protected margins come out
-    // the same. A competing claim that landed in between changes the answer, and a
-    // changed answer refuses.
+    // locks the neighbours are re-read and every required leg must match a fresh
+    // fact prepared above. The claim is written only if the window and protected
+    // margins still fit. A competing neighbour absent from that prepared set makes
+    // the callback refuse without performing provider I/O.
     $result = $this->store->claimWithRevalidation(
       new DispatchClaim(
         $plan->offer->slot,
@@ -329,9 +332,9 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
         $plan->routeSeconds,
         $plan->routeMeters,
       ),
-      // Read-only and bounded: no transaction, no lock, no write, and at most
-      // MAX_CLAIM_ROUTE_LOOKUPS route lookups.
-      fn(): DispatchReason => $this->replanUnderLock($request, $plan, $profile, NULL, $authority),
+      // Read-only and provider-free: all external facts were prepared before the
+      // Resource Calendar Guard was acquired.
+      fn(): DispatchReason => $this->replanUnderLock($request, $plan, $profile, NULL, $authority, $estimator),
     );
 
     // 6. Keep the receipt in the session that owns it.
@@ -349,7 +352,14 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    * {@inheritdoc}
    */
   public function confirmReservation(Hold $hold, WebformSubmissionInterface $submission): ReservationResult {
-    return $this->confirmFor($hold, $submission, PlanAuthority::Visitor);
+    return $this->confirmFor($hold, $submission, PlanAuthority::Visitor, $this->offerRouteEstimator);
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function confirmCheckoutReservation(Hold $hold, WebformSubmissionInterface $submission): ReservationResult {
+    return $this->confirmFor($hold, $submission, PlanAuthority::Visitor, $this->finalRouteEstimator);
   }
 
   /**
@@ -364,7 +374,12 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    * changed plan refuses rather than quietly confirming a window that was proved
    * for a different job.
    */
-  private function confirmFor(Hold $hold, WebformSubmissionInterface $submission, PlanAuthority $authority): ReservationResult {
+  private function confirmFor(
+    Hold $hold,
+    WebformSubmissionInterface $submission,
+    PlanAuthority $authority,
+    DispatchRouteEstimatorInterface $estimator,
+  ): ReservationResult {
     $submissionId = (int) $submission->id();
     if ($submissionId < 1) {
       // An unsaved submission has no identity to confirm against, and the seam
@@ -398,13 +413,55 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
       return ReservationResult::refused(DispatchReason::NotConfigured);
     }
 
+    // Read the Hold once without authority, solely to prepare every route fact the
+    // locked revalidation may need. The store re-reads it under the guard below;
+    // identity and plan comparisons make this advisory read safe to race.
+    $preparedHold = $this->store->heldForPlanning($token, $ownerId);
+    if ($preparedHold === NULL || $preparedHold->webformId !== $request->webformId) {
+      return ReservationResult::refused(DispatchReason::HoldNotFound);
+    }
+    $normalised = $this->normalisedSlot($preparedHold->slot);
+    if ($normalised === NULL) {
+      return ReservationResult::refused(DispatchReason::NotConfigured);
+    }
+    [$preparedSlot, $profile] = $normalised;
+    $preparedPlan = $this->preparePlanFor(
+      $request,
+      $preparedSlot,
+      $profile,
+      $preparedHold->reservationId,
+      $authority,
+      $estimator,
+    );
+    if ($preparedPlan instanceof DispatchReason) {
+      return ReservationResult::refused($preparedPlan);
+    }
+    $preparedReason = $this->planStillHolds(
+      $preparedPlan,
+      $preparedHold->windowStart,
+      $preparedHold->windowEnd,
+      $preparedHold->inboundRepositionSeconds,
+      $preparedHold->outboundRepositionSeconds,
+      $request->webformId,
+    );
+    if ($preparedReason !== DispatchReason::Available) {
+      return ReservationResult::refused($preparedReason);
+    }
+
     $result = $this->store->confirmWithRevalidation(
       $token,
       $ownerId,
       $submissionId,
-      // Read-only and bounded: it opens no transaction, takes no lock, writes
-      // nothing, and issues at most MAX_CLAIM_ROUTE_LOOKUPS route lookups.
-      fn(LockedHold $locked): DispatchReason => $this->revalidate($locked, $request, $authority),
+      // Read-only and provider-free. A neighbour not represented in the prepared
+      // set refuses instead of becoming a network call under the lock.
+      fn(LockedHold $locked): DispatchReason => $this->revalidate(
+        $locked,
+        $preparedHold,
+        $preparedPlan,
+        $request,
+        $authority,
+        $estimator,
+      ),
     );
 
     if ($result->reservationId !== NULL) {
@@ -481,7 +538,7 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     // occupancy read so it cannot conflict with the space it is leaving. Every
     // other live claim, Blackout, break, working hour, horizon rule, predecessor
     // and successor Repositioning leg and return-to-base rule still applies.
-    $plan = $this->planFor($request, $slot, $profile, $dispatchReservationId, PlanAuthority::Staff);
+    $plan = $this->preparePlanFor($request, $slot, $profile, $dispatchReservationId, PlanAuthority::Staff, $this->finalRouteEstimator);
     if ($plan instanceof DispatchReason) {
       return ReplanResult::refused($plan);
     }
@@ -502,9 +559,9 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
         $plan->routeSeconds,
         $plan->routeMeters,
       ),
-      // Read-only and bounded: no transaction, no lock, no write, and at most
-      // MAX_CLAIM_ROUTE_LOOKUPS route lookups.
-      fn(): DispatchReason => $this->replanUnderLock($request, $plan, $profile, $dispatchReservationId, PlanAuthority::Staff),
+      // Read-only and provider-free: the final-route facts above are the only
+      // route answers this locked callback may consume.
+      fn(): DispatchReason => $this->replanUnderLock($request, $plan, $profile, $dispatchReservationId, PlanAuthority::Staff, $this->finalRouteEstimator),
     );
   }
 
@@ -613,12 +670,12 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     // threaded through both halves. Nothing here re-implements a claim: the Hold
     // is taken under the guard locks, and the plan is re-proved under them again
     // at confirmation, so work staff book is proved exactly as often.
-    $held = $this->createHoldFor($request, $slot, PlanAuthority::Staff);
+    $held = $this->createHoldFor($request, $slot, PlanAuthority::Staff, $this->finalRouteEstimator);
     if ($held->hold === NULL) {
       return ReservationResult::refused($held->reason);
     }
 
-    $result = $this->confirmFor($held->hold, $submission, PlanAuthority::Staff);
+    $result = $this->confirmFor($held->hold, $submission, PlanAuthority::Staff, $this->finalRouteEstimator);
     if ($result->reservationId === NULL) {
       // The Hold was taken moments ago and is not going to be confirmed, so it is
       // handed back rather than left to lapse. Leaving it would withhold capacity
@@ -654,8 +711,19 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    * @return \Drupal\custom_webform_handlers\Dispatch\DispatchReason
    *   Available to confirm, or the reason the plan no longer holds.
    */
-  private function revalidate(LockedHold $locked, DispatchRequest $request, PlanAuthority $authority): DispatchReason {
-    if ($locked->webformId !== $request->webformId) {
+  private function revalidate(
+    LockedHold $locked,
+    LockedHold $preparedHold,
+    SlotPlan $expected,
+    DispatchRequest $request,
+    PlanAuthority $authority,
+    DispatchRouteEstimatorInterface $estimator,
+  ): DispatchReason {
+    if ($locked->reservationId !== $preparedHold->reservationId
+      || $locked->webformId !== $request->webformId
+      || $locked->slot->resourceId !== $preparedHold->slot->resourceId
+      || $locked->slot->webformId !== $preparedHold->slot->webformId
+      || $locked->slot->startTimestamp !== $preparedHold->slot->startTimestamp) {
       // The Hold belongs to a different form than the submission confirming it.
       return DispatchReason::InvalidRequest;
     }
@@ -669,7 +737,16 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     // The reservation id is excluded from the occupancy read for one reason: a
     // Hold that conflicted with itself could never be confirmed. It is used here
     // and goes no further.
-    $plan = $this->planFor($request, $slot, $profile, $locked->reservationId, $authority);
+    $plan = $this->planFor(
+      $request,
+      $slot,
+      $profile,
+      $locked->reservationId,
+      $authority,
+      $estimator,
+      $expected->routeFacts,
+      FALSE,
+    );
     if ($plan instanceof DispatchReason) {
       return $plan;
     }
@@ -698,8 +775,18 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     ResourceProfile $profile,
     ?int $excludeReservationId,
     PlanAuthority $authority,
+    DispatchRouteEstimatorInterface $estimator,
   ): DispatchReason {
-    $plan = $this->planFor($request, $expected->offer->slot, $profile, $excludeReservationId, $authority);
+    $plan = $this->planFor(
+      $request,
+      $expected->offer->slot,
+      $profile,
+      $excludeReservationId,
+      $authority,
+      $estimator,
+      $expected->routeFacts,
+      FALSE,
+    );
     if ($plan instanceof DispatchReason) {
       return $plan;
     }
@@ -770,15 +857,50 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    * sequences the margin would have allowed and accepts ones it would have
    * declined.
    *
+   * @param \Drupal\custom_webform_handlers\Dispatch\DispatchRequest $request
+   *   The normalized request being scheduled.
+   * @param \Drupal\custom_webform_handlers\Dispatch\Slot $slot
+   *   The exact candidate pickup arrival.
+   * @param \Drupal\custom_webform_handlers\Dispatch\ResourceProfile $profile
+   *   The selected resource's operating profile.
    * @param int|null $excludeReservationId
    *   A reservation to leave out of the occupancy read, used only so a Hold being
    *   confirmed, or a Reservation being moved, does not conflict with itself.
    * @param \Drupal\custom_webform_handlers\Dispatch\PlanAuthority $authority
    *   Who is asking. Selects which eligibility answer is read and has no other
    *   effect: every check below this gate is a fact about the vehicle and the day.
+   * @param \Drupal\custom_webform_handlers\Dispatch\Route\DispatchRouteEstimatorInterface $estimator
+   *   The trusted offer or final route estimator selected by the caller.
    *
    * @return \Drupal\custom_webform_handlers\Dispatch\SlotPlan|\Drupal\custom_webform_handlers\Dispatch\DispatchReason
    *   The proved plan, or the reason the candidate is not servable.
+   */
+  private function preparePlanFor(
+    DispatchRequest $request,
+    Slot $slot,
+    ResourceProfile $profile,
+    ?int $excludeReservationId,
+    PlanAuthority $authority,
+    DispatchRouteEstimatorInterface $estimator,
+  ): SlotPlan|DispatchReason {
+    return $this->planFor(
+      $request,
+      $slot,
+      $profile,
+      $excludeReservationId,
+      $authority,
+      $estimator,
+      new PreparedRouteFacts(),
+      TRUE,
+    );
+  }
+
+  /**
+   * Runs the single feasibility algorithm from prepared or fetchable route facts.
+   *
+   * $mayFetch is TRUE only before a Resource Calendar Guard transaction. Locked
+   * callbacks pass FALSE and therefore either find an exact fresh fact prepared
+   * above or refuse; no provider can be reached from the locked path.
    */
   private function planFor(
     DispatchRequest $request,
@@ -786,6 +908,9 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     ResourceProfile $profile,
     ?int $excludeReservationId,
     PlanAuthority $authority,
+    DispatchRouteEstimatorInterface $estimator,
+    PreparedRouteFacts $facts,
+    bool $mayFetch,
   ): SlotPlan|DispatchReason {
     // Eligibility, first and unconditionally. Whether this job may be booked at
     // all is not a question the presence of a Slot answers.
@@ -830,8 +955,7 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
       return DispatchReason::NotConfigured;
     }
 
-    $legs = [];
-    $serviceLeg = $this->routeLeg($legs, $request->pickupAddress, $request->deliveryAddress, $slot->startTimestamp);
+    $serviceLeg = $this->routeLeg($facts, $estimator, $request->pickupAddress, $request->deliveryAddress, $slot->startTimestamp, $mayFetch);
     if ($serviceLeg === NULL) {
       // Unroutable is unknown, and unknown never shortens a window.
       return DispatchReason::IncompleteFacts;
@@ -858,7 +982,7 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     $depot = trim($profile->depotAddress);
     if ($profile->returnToBase) {
       // Guaranteed non-empty: requiresDepotConfiguration() refused above.
-      $returnLeg = $this->routeLeg($legs, $request->deliveryAddress, $depot, $end);
+      $returnLeg = $this->routeLeg($facts, $estimator, $request->deliveryAddress, $depot, $end, $mayFetch);
       if ($returnLeg === NULL) {
         return DispatchReason::IncompleteFacts;
       }
@@ -884,7 +1008,7 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
         // unroutable leg is unknown rather than free.
         return DispatchReason::IncompleteFacts;
       }
-      $inboundLeg = $this->routeLeg($legs, $origin, $request->pickupAddress, $previous->windowEnd);
+      $inboundLeg = $this->routeLeg($facts, $estimator, $origin, $request->pickupAddress, $previous->windowEnd, $mayFetch);
       if ($inboundLeg === NULL) {
         return DispatchReason::IncompleteFacts;
       }
@@ -895,7 +1019,7 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
       }
     }
     elseif ($depot !== '') {
-      $depotLeg = $this->routeLeg($legs, $depot, $request->pickupAddress, $day->workStart);
+      $depotLeg = $this->routeLeg($facts, $estimator, $depot, $request->pickupAddress, $day->workStart, $mayFetch);
       if ($depotLeg === NULL) {
         return DispatchReason::IncompleteFacts;
       }
@@ -920,7 +1044,7 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
       if ($destination === '') {
         return DispatchReason::IncompleteFacts;
       }
-      $outboundLeg = $this->routeLeg($legs, $request->deliveryAddress, $destination, $end);
+      $outboundLeg = $this->routeLeg($facts, $estimator, $request->deliveryAddress, $destination, $end, $mayFetch);
       if ($outboundLeg === NULL) {
         return DispatchReason::IncompleteFacts;
       }
@@ -959,6 +1083,7 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
       $outboundSeconds,
       $serviceLeg->seconds,
       $serviceLeg->meters,
+      $facts,
     );
   }
 
@@ -1010,6 +1135,8 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    *
    * @param \Drupal\custom_webform_handlers\Dispatch\Storage\PlanningNeighbour[] $neighbours
    *   Neighbouring Dispatch Windows, with the addresses their legs need.
+   * @param int $candidateStart
+   *   The candidate Dispatch Window start, in UTC.
    */
   private function previousNeighbour(array $neighbours, int $candidateStart): ?PlanningNeighbour {
     $previous = NULL;
@@ -1030,6 +1157,8 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    *
    * @param \Drupal\custom_webform_handlers\Dispatch\Storage\PlanningNeighbour[] $neighbours
    *   Neighbouring Dispatch Windows, with the addresses their legs need.
+   * @param int $candidateEnd
+   *   The candidate Dispatch Window end, in UTC.
    */
   private function nextNeighbour(array $neighbours, int $candidateEnd): ?PlanningNeighbour {
     $next = NULL;
@@ -1077,8 +1206,24 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
   /**
    * Tests every grid candidate on one day and returns the feasible ones.
    *
+   * @param \Drupal\custom_webform_handlers\Dispatch\DispatchRequest $request
+   *   The normalized request being offered.
+   * @param \Drupal\custom_webform_handlers\Dispatch\ResourceProfile $profile
+   *   The resource's operating profile.
+   * @param \Drupal\custom_webform_handlers\Dispatch\ResourceDay $day
+   *   The local operating-day definition.
+   * @param \Drupal\custom_webform_handlers\Dispatch\ServiceDuration $duration
+   *   The normalized service work duration.
+   * @param \Drupal\custom_webform_handlers\Dispatch\RouteEstimate $serviceLeg
+   *   The prepared pickup-to-destination route.
+   * @param \Drupal\custom_webform_handlers\Dispatch\RouteEstimate|null $depotLeg
+   *   The prepared depot-to-pickup route, when required.
+   * @param \Drupal\custom_webform_handlers\Dispatch\RouteEstimate|null $returnLeg
+   *   The prepared destination-to-depot route, when required.
    * @param \Drupal\custom_webform_handlers\Dispatch\OccupiedInterval[] $occupied
    *   Advisory occupancy, including administrative Blackouts.
+   * @param int $promiseMinutes
+   *   The maximum customer-facing pickup promise.
    *
    * @return \Drupal\custom_webform_handlers\Dispatch\SlotOffer[]
    *   Feasible offers, in the order the grid produced them.
@@ -1206,6 +1351,10 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    *
    * @param \Drupal\custom_webform_handlers\Dispatch\OccupiedInterval[] $occupied
    *   Advisory occupancy.
+   * @param int $dayStart
+   *   The local operating day's start, represented in UTC.
+   * @param int $candidateStart
+   *   The candidate pickup arrival, in UTC.
    */
   private function hasEarlierJob(array $occupied, int $dayStart, int $candidateStart): bool {
     foreach ($occupied as $interval) {
@@ -1233,6 +1382,10 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    *
    * @param \Drupal\custom_webform_handlers\Dispatch\OccupiedInterval[] $occupied
    *   Advisory occupancy.
+   * @param int $protectedStart
+   *   The beginning of the protected capacity interval.
+   * @param int $protectedEnd
+   *   The end of the protected capacity interval.
    */
   private function intrudes(array $occupied, int $protectedStart, int $protectedEnd): bool {
     foreach ($occupied as $interval) {
@@ -1264,27 +1417,39 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    * one seam every route lookup passes through, so Offer, Hold, Confirm and Replan
    * cannot diverge on it.
    *
-   * @param array<string, \Drupal\custom_webform_handlers\Dispatch\RouteEstimate|false> $legs
-   *   The invocation-local memo. FALSE records a failed lookup so an unroutable
-   *   pair is not retried on every candidate.
+   * PreparedRouteFacts is the invocation-local memo. When $mayFetch is FALSE this
+   * method is a pure validation read and cannot reach the provider.
    */
-  private function routeLeg(array &$legs, string $origin, string $destination, int $departureAt): ?RouteEstimate {
-    $key = $origin . "\0" . $destination . "\0" . $departureAt;
-    if (!array_key_exists($key, $legs)) {
-      $estimate = $this->routeEstimator->estimate($origin, $destination, $departureAt);
-
-      if ($estimate !== NULL && !$estimate->trafficAware && $this->requireTrafficAware()) {
-        // The profile says a schedule may only be built on real traffic data. The
-        // leg is treated as unmeasurable rather than accepted with a margin, which
-        // withholds the Slot and leaves the request for staff to place by hand.
-        $this->logger->notice('Route leg is not traffic-aware and routing.require_traffic_aware is set, so the leg is refused.');
-        $estimate = NULL;
+  private function routeLeg(
+    PreparedRouteFacts $facts,
+    DispatchRouteEstimatorInterface $estimator,
+    string $origin,
+    string $destination,
+    int $departureAt,
+    bool $mayFetch,
+  ): ?RouteEstimate {
+    $estimate = $facts->find($origin, $destination, $departureAt);
+    if ($estimate === NULL && $mayFetch) {
+      $estimate = $estimator->estimate($origin, $destination, $departureAt);
+      if ($estimate !== NULL) {
+        $facts->remember($origin, $destination, $departureAt, $estimate);
       }
-
-      $legs[$key] = $estimate ?? FALSE;
     }
 
-    return $legs[$key] === FALSE ? NULL : $legs[$key];
+    if ($estimate === NULL
+      || !$estimator->accepts($estimate, $origin, $destination, $departureAt)) {
+      return NULL;
+    }
+
+    if (!$estimate->trafficAware && $this->requireTrafficAware()) {
+      // The profile says a schedule may only be built on real traffic data. The
+      // leg is treated as unmeasurable rather than accepted with a margin, which
+      // withholds the Slot and leaves the request for staff to place by hand.
+      $this->logger->notice('Route leg is not traffic-aware and routing.require_traffic_aware is set, so the leg is refused.');
+      return NULL;
+    }
+
+    return $estimate;
   }
 
   /**

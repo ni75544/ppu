@@ -272,8 +272,7 @@ final class DispatchCheckoutStarter {
   }
 
   /**
-   * Opens the order for one derived checkout and returns where to send the
-   * customer.
+   * Opens the order and returns the customer's checkout destination.
    *
    * The manager's start() is the only composer of gate, Hold, order, and attempt,
    * and it is idempotent: the same submission, Slot, and price return the same
@@ -353,13 +352,13 @@ final class DispatchCheckoutStarter {
    * Rebuilds the server quote and locks it into a snapshot, or refuses.
    *
    * Distance is recomputed rather than reconstructed from a stored figure: a
-   * DistanceResult carries a duration a stored mileage cannot supply, and the
-   * route provider is cached, so recomputing within the saving request is a warm
-   * read that reproduces preSave's own result. The full submission data is passed
-   * to the calculator exactly as preSave passes it — no re-filtered subset, which
-   * is the mismatch an earlier task had to correct. A manual-review status yields
-   * no snapshot, which is the checkout refusing to charge for a quote a human must
-   * still price.
+   * DistanceResult carries a duration a stored mileage cannot supply. The
+   * ordinary chain memoizes a successful result only for this HTTP request, so
+   * this read reproduces preSave's result even when provider terms forbid
+   * persistent caching. The full submission data is passed to the calculator
+   * exactly as preSave passes it — no re-filtered subset, which is the mismatch
+   * an earlier task had to correct. A manual-review status yields no snapshot,
+   * which refuses to charge for a quote a human must still price.
    */
   private function resolveQuote(WebformSubmissionInterface $submission, array $settings, int $submissionId): ?QuoteSnapshot {
     $origin = $submission->getElementData((string) ($settings['origin_address_field'] ?? ''));
@@ -383,7 +382,7 @@ final class DispatchCheckoutStarter {
 
     $quote = $this->quoteCalculator->calculate($submission->getData(), $distance);
 
-    return QuoteSnapshot::fromQuoteResult($quote);
+    return QuoteSnapshot::fromQuoteResult($quote, $origin, $destination);
   }
 
 }

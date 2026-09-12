@@ -1,0 +1,130 @@
+# Private Nominatim geocoder for the routing cost-reduction work (Task 20D
+# prerequisite). Hand-authored: deliberately carries no generated-file marker,
+# so DDEV treats this file as project-owned and will not rewrite it.
+#
+# This exists because Task 20A recorded that only one coordinate provenance
+# carries unrestricted rights to persist a coordinate, pass it to another
+# provider, and render it on a non-origin map: "Self-hosted geocoder under this
+# project's operation". Every hosted alternative is either rights-restricted or
+# billed per request, and the public Nominatim instance is explicitly not a
+# candidate under its own usage policy.
+#
+# The extract is pinned, not tracked. `nyc-metro-260904.osm.pbf` (269504387
+# bytes, md5 77b0c1c4f92b37ccd0fb32881dc04b31, i.e. data_version
+# nycmetro-20260904T202121Z+md5.77b0c1c4) lives in the external `ppu-osm-data`
+# volume so the future OSRM service can mount the identical file rather than
+# regenerate its own. Geocoding and routing must share one road graph or
+# endpoints snap to a dataset that did not route them.
+#
+# It was cut locally, not downloaded: `osmium extract
+# --bbox=-74.35,40.45,-72.75,41.20 --strategy=complete_ways --set-bounds` from
+# Geofabrik's us-northeast-260904.osm.pbf (1796226812 bytes, md5
+# 5ec14912e375b58c5925894a42cd8e79, verified against the publisher's own .md5,
+# replication timestamp 2026-09-04T20:21:21Z, sequence 4902). That parent has
+# since been deleted. The child's newest object is 2026-09-04T20:20:41Z and it
+# carries no osmosis_replication_* header of its own -- osmium does not
+# propagate one -- so the timestamp in data_version is inherited provenance,
+# recorded here because it cannot be read back out of the file.
+services:
+  nominatim:
+    container_name: ddev-${DDEV_SITENAME}-nominatim
+    image: mediagis/nominatim:5.3.2-2026-06-23T09-03
+    hostname: nominatim
+    # These labels ensure this service is discoverable by ddev.
+    labels:
+      com.ddev.site-name: ${DDEV_SITENAME}
+      com.ddev.approot: ${DDEV_APPROOT}
+    restart: "no"
+    # `expose`, never `ports`. The Nominatim HTTP API has no authentication of
+    # any kind, so it is reachable only from the DDEV network as
+    # http://nominatim:8080 and is not published to the host.
+    expose:
+      - 8080
+    # The image's own guidance is a 1GB floor; the large values in its examples
+    # are sized for a planet import, not a regional extract.
+    shm_size: 1gb
+    # Holds only NOMINATIM_PASSWORD. Git-ignored at /.ddev/.env.nominatim and
+    # regenerated per machine, so no credential enters version control.
+    env_file:
+      - ./.env.nominatim
+    environment:
+      # PBF_PATH, and deliberately not PBF_URL: the image forbids setting both,
+      # and a URL would re-resolve `-latest` on every rebuild and silently
+      # dissolve the pin this whole file exists to hold.
+      PBF_PATH: "/osm/nyc-metro-260904.osm.pbf"
+      # Addresses and streets, not POIs. This instance answers one question --
+      # what are the coordinates of a committed delivery address.
+      IMPORT_STYLE: "address"
+      # 8 of 12 host CPUs, leaving the web, db, redis and selenium containers
+      # responsive through a multi-hour import.
+      THREADS: "8"
+      # Left unfrozen so a replication catch-up stays possible; freezing saves
+      # disk but permanently disables updates.
+      FREEZE: "false"
+      # Replication is configured but idle. UPDATE_MODE=none is what keeps the
+      # running database equal to the pinned snapshot -- continuous updates
+      # would leave data_version asserting a snapshot the database no longer
+      # holds. The monthly refresh is a deliberate re-import against a new pin.
+      REPLICATION_URL: "https://download.geofabrik.de/north-america/us-northeast-updates/"
+      UPDATE_MODE: "none"
+      # Sized for the ~7.6GB this Docker host offers, not the 60GB+ in the
+      # image's planet-import examples. Quoted throughout because YAML would
+      # read a bare `off` as a boolean and hand PostgreSQL "false".
+      POSTGRES_SHARED_BUFFERS: "2GB"
+      POSTGRES_MAINTENANCE_WORK_MEM: "2GB"
+      POSTGRES_AUTOVACUUM_WORK_MEM: "1GB"
+      POSTGRES_WORK_MEM: "50MB"
+      POSTGRES_EFFECTIVE_CACHE_SIZE: "4GB"
+      POSTGRES_SYNCHRONOUS_COMMIT: "off"
+      POSTGRES_MAX_WAL_SIZE: "1GB"
+      POSTGRES_CHECKPOINT_TIMEOUT: "10min"
+      POSTGRES_CHECKPOINT_COMPLETION_TARGET: "0.9"
+    volumes:
+      # Read-only: the import reads the extract and nothing writes to it.
+      - "ppu-osm-data:/osm:ro"
+      # PostgreSQL 16 per the image, confirmed by inspecting the image rather
+      # than assumed -- a wrong major here would import successfully and then
+      # lose the database on the next container recreate.
+      - "nominatim-db:/var/lib/postgresql/16/main"
+      # No flatnode volume, deliberately. `config.sh:54-56` sets
+      # NOMINATIM_FLATNODE_FILE only if /nominatim/flatnode exists, and the image
+      # ships no such directory, so with nothing mounted there the setting stays
+      # unset and osm2pgsql keeps node locations in PostgreSQL -- a documented
+      # import mode, not a workaround. The file it used to hold was 105 GiB, was
+      # never read by nominatim_api, and is only required for replication
+      # updates, which UPDATE_MODE=none plus the monthly full re-import policy
+      # does not use. Restoring incremental updates means restoring this mount
+      # AND re-importing; do not add it back without both.
+      # Durable PostgreSQL hardening, mounted per FILE. The image ships
+      # `host all all 0.0.0.0/0 md5` as the last rule of its own pg_hba.conf and
+      # offers no override mechanism for authentication rules, so that file is
+      # replaced outright. Mounting the conf.d *directory* instead of one file
+      # into it would hide postgres-tuning.conf -- every POSTGRES_* setting
+      # above -- and postgres-import.conf, which init.sh:84 copies in for the
+      # import and init.sh:147 removes afterwards.
+      - "./nominatim/pg_hba.conf:/etc/postgresql/16/main/pg_hba.conf:ro"
+      - "./nominatim/zz-ppu-hardening.conf:/etc/postgresql/16/main/conf.d/zz-ppu-hardening.conf:ro"
+      - "./nominatim/pg-hardening-entrypoint.sh:/app/ppu-pg-hardening-entrypoint.sh:ro"
+    # The image declares no entrypoint and `/app/start.sh` as its command, so
+    # this wraps it rather than replacing it. The shim exists because the drop-in
+    # above cannot win on its own: postgresql.conf pins `listen_addresses='*'` at
+    # line 828, *after* its own `include_dir = 'conf.d'` at line 817, and
+    # PostgreSQL takes the last assignment. The shim rewrites that line and
+    # aborts the boot if either mount above failed to land -- a mistyped target
+    # makes Docker create a directory and PostgreSQL silently fall back to the
+    # image's permissive pg_hba.conf. `sh <path>` rather than the bare path: a
+    # bind mount from NTFS carries no reliable execute bit.
+    command: ["sh", "/app/ppu-pg-hardening-entrypoint.sh"]
+    x-ddev:
+      describe-info: |
+        Nominatim 5.3.2 -- nyc-metro-260904 (internal only: http://nominatim:8080)
+
+volumes:
+  # External on purpose. The pinned extract is shared with the future OSRM
+  # service and survives `ddev delete`, so a 1.7GB verified download is not
+  # discarded with the project's own volumes. Created by the provisioning
+  # procedure; if it is absent the service refuses to start rather than
+  # importing nothing.
+  ppu-osm-data:
+    external: true
+  nominatim-db:

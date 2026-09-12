@@ -27,7 +27,8 @@
         "drupal/geocoder": "^4.0",
         "drupal/redis": "^1.11",
         "drupal/webform": "^6.3",
-        "drush/drush": "^13.6"
+        "drush/drush": "^13.6",
+        "geocoder-php/nominatim-provider": "^5.8"
     },
     "conflict": {
         "drupal/drupal": "*"

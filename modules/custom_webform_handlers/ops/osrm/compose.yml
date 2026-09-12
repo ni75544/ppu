@@ -1,0 +1,66 @@
+# Optional operator template, not a DDEV override or an activated deployment.
+# Read ../../docs/operations/osrm-routing.md before provisioning.
+name: ppu-osrm
+
+services:
+  prepare:
+    profiles: [prepare]
+    image: ${OSRM_IMAGE:?Set a verified official OSRM tag@sha256 digest}
+    entrypoint: []
+    command: ["sh", "-ec", "echo 'Run an explicit preparation stage from the runbook'; exit 1"]
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: ${OSRM_BUILD_CPUS:-2}
+    mem_limit: ${OSRM_BUILD_MEMORY:-4g}
+    pids_limit: 128
+    volumes:
+      - source:/source:ro
+      - graph:/data
+
+  osrm:
+    image: ${OSRM_IMAGE:?Set a verified official OSRM tag@sha256 digest}
+    entrypoint: []
+    command:
+      - osrm-routed
+      - --algorithm
+      - mld
+      - --ip
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --threads
+      - "2"
+      - /data/nyc-metro-260904.osrm
+    user: "65534:65534"
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    cpus: ${OSRM_SERVE_CPUS:-2}
+    mem_limit: ${OSRM_SERVE_MEMORY:-2g}
+    pids_limit: 128
+    restart: "no"
+    expose: ["5000"]
+    volumes:
+      - graph:/data:ro
+    networks:
+      application:
+        aliases: [ppu-osrm]
+
+volumes:
+  source:
+    external: true
+    name: ${OSM_SOURCE_VOLUME:-ppu-osm-data}
+  graph:
+    external: true
+    name: ${OSRM_DATA_VOLUME:?Set a dedicated prepared OSRM output volume}
+
+networks:
+  application:
+    external: true
+    name: ${OSRM_APP_NETWORK:?Set the inspected project-specific Docker network}

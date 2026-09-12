@@ -90,7 +90,7 @@ interface ReservationStoreInterface {
   /**
    * Atomically claims one Slot, re-deriving its plan under the guard locks.
    *
-   * claim() above re-reads occupancy inside the transaction, but it inserts the
+   * The claim() method re-reads occupancy inside the transaction, but it inserts the
    * intervals it was handed. Those intervals were derived before the locks
    * existed, and the exact Repositioning they encode depends on which jobs
    * neighbour the candidate — which is precisely what a competing claim can have
@@ -103,8 +103,8 @@ interface ReservationStoreInterface {
    * neighbours that actually exist, and the claim is written only if the plan the
    * planner proved before the transaction is still the plan the day supports.
    *
-   * The callback runs with the guard rows locked, so it may issue route lookups
-   * and must therefore be bounded. Like the confirmation callback, it must never
+   * The callback runs with the guard rows locked, so it must consume only route
+   * facts prepared before the transaction. It must never perform external I/O,
    * open a transaction, take a guard lock, or write.
    *
    * @param \Drupal\custom_webform_handlers\Dispatch\DispatchClaim $claim
@@ -141,6 +141,19 @@ interface ReservationStoreInterface {
   public function confirm(string $rawHoldToken, string $rawOwnerId, int $submissionId): ReservationResult;
 
   /**
+   * Reads an owned live Hold for provider-free confirmation preparation.
+   *
+   * Advisory only. The same row is re-read under the Resource Calendar Guard by
+   * confirmWithRevalidation(), and the planner compares the locked identity and
+   * complete plan with this prepared view before anything is written.
+   *
+   * @internal
+   *   Planner-only. It contains private schedule facts and never reaches a
+   *   controller, response, template, or drupalSettings.
+   */
+  public function heldForPlanning(string $rawHoldToken, string $rawOwnerId): ?LockedHold;
+
+  /**
    * Confirms a Hold only if a planner callback re-proves it under the locks.
    *
    * This exists because confirm() above proves only that the Hold is still live
@@ -155,14 +168,14 @@ interface ReservationStoreInterface {
    * So the sequence is: open the transaction, take the guard rows for every local
    * day the stored claim touches, re-read the Hold under those locks, hand it to
    * the callback, and write only if the callback says the plan still holds. The
-   * feasibility rules stay in the planner; the transaction stays here. Neither
-   * side learns the other's mechanics.
+   * feasibility rules stay in the planner; the transaction stays here. External
+   * route facts are prepared before this call and only validated here, so neither
+   * side learns the other's mechanics and no provider waits on a calendar lock.
    *
    * The callback runs with the guard rows locked, which is the point rather than an
-   * accident: the rule is that route and schedule feasibility are recalculated
-   * while those rows are held. It follows that the callback may issue route lookups
-   * inside the transaction, so it must be bounded, and it must never open a
-   * transaction, take a guard lock, or write.
+   * accident: schedule feasibility is recalculated against the locked neighbours,
+   * using only the route facts prepared by the planner. It must never perform
+   * external I/O, open a transaction, take a guard lock, or write.
    *
    * @param string $rawHoldToken
    *   The bearer token as presented. Hashed for comparison, never stored raw.
@@ -338,7 +351,7 @@ interface ReservationStoreInterface {
   /**
    * Withholds a span from booking, but only if nothing live occupies it.
    *
-   * addBlackout() above is the unguarded insert and stays that way; this is the
+   * The addBlackout() method is the unguarded insert and stays that way; this is the
    * operation staff reach. The difference is the one that matters: writing a
    * Blackout over a live claim would produce a schedule in which the vehicle is
    * simultaneously booked and unavailable, so the span is checked against every
@@ -530,7 +543,7 @@ interface ReservationStoreInterface {
   /**
    * Returns the little that may be said about one claim, Hold or Reservation.
    *
-   * adminReservation() above answers NULL for a Hold on purpose, because a Hold
+   * The adminReservation() method answers NULL for a Hold on purpose, because a Hold
    * has no detail an administrator is entitled to read. But a Hold can be
    * released, and a confirmation form has to be able to say what it is about to
    * release without lying about it. This is that summary and nothing more.
@@ -554,7 +567,7 @@ interface ReservationStoreInterface {
   /**
    * Frees the capacity one claim holds, on staff authority, keeping the row.
    *
-   * release() above is the visitor's operation and is keyed by the Hold token,
+   * The release() method is the visitor's operation and is keyed by the Hold token,
    * which is how it proves the caller owns what it is releasing. Staff hold no
    * token, so this is keyed by identifier — and because it is, it takes the
    * Resource Calendar Guard rows for the claim's local days before it re-reads and

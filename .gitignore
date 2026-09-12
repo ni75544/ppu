@@ -207,3 +207,12 @@ graph.json
 /TASK_4_CLAUDE_CODE_PROMPT.md
 /TASK_7_MICRO_PASSES.md
 /TASK_7_RECOVERY_PROMPT.md
+
+# Generated database password for the private Nominatim geocoder container
+# (Task 20D prerequisite). The service definition in
+# .ddev/docker-compose.nominatim.yaml is versioned deliberately -- only the
+# secret is not, and it is regenerated per machine rather than shared.
+#
+# The rule lives here rather than in .ddev/.gitignore because DDEV rewrites
+# that file on every start and would drop it.
+/.ddev/.env.nominatim

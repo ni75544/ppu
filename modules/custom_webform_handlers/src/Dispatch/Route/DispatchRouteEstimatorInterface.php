@@ -7,20 +7,21 @@ use Drupal\custom_webform_handlers\Dispatch\RouteEstimate;
 /**
  * Estimates driving time between two points for a given departure.
  *
- * The departure time is load-bearing: the same pair of addresses is not the same
- * journey at 08:00 and at 17:00, and an implementation is expected to ask its
- * provider about the hour it was given rather than about an average day. Because
- * the seam was shaped this way from the outset, becoming traffic-aware was a change
- * inside one adapter and none at all to the callers.
+ * The departure time is load-bearing: the same pair of addresses is not the
+ * same journey at 08:00 and at 17:00, and an implementation is expected to ask
+ * its provider about the hour it was given rather than about an average day.
+ * Because the seam was shaped this way from the outset, becoming traffic-aware
+ * was a change inside one adapter and none at all to the callers.
  *
- * Implementations must not leak the provider's raw payload. Only duration,
- * distance, and whether the departure time influenced the answer cross this seam.
+ * Implementations must not leak the provider's raw payload. Only normalized
+ * route facts and the bounded provenance needed to validate their reuse cross
+ * this seam.
  *
  * An implementation that could not obtain a traffic-aware figure must say so
  * through RouteEstimate::$trafficAware and must not return the traffic-free
- * duration unmodified. Either widen it conservatively or return NULL; a figure that
- * is optimistic but indistinguishable from a scheduled one is the one outcome this
- * contract forbids.
+ * duration unmodified. Either widen it conservatively or return NULL; a figure
+ * that is optimistic but indistinguishable from a scheduled one is the one
+ * outcome this contract forbids.
  */
 interface DispatchRouteEstimatorInterface {
 
@@ -32,7 +33,7 @@ interface DispatchRouteEstimatorInterface {
    * @param string $destination
    *   Where the Resource is heading.
    * @param int $departureAt
-   *   When the Resource departs, in UTC. An implementation may quantize this to a
+   *   When the Resource departs, in UTC. This may be quantized to a
    *   coarser bucket before asking its provider, so that measuring a whole day
    *   does not cost one request per candidate arrival.
    *
@@ -40,6 +41,24 @@ interface DispatchRouteEstimatorInterface {
    *   The estimate, or NULL when no route could be established. NULL must be
    *   treated as "cannot schedule this leg", never as zero travel time.
    */
-  public function estimate(string $origin, string $destination, int $departureAt): ?RouteEstimate;
+  public function estimate(
+    string $origin,
+    string $destination,
+    int $departureAt,
+  ): ?RouteEstimate;
+
+  /**
+   * Tells whether a prepared estimate still answers this exact question.
+   *
+   * This method must perform no network or storage I/O. It is called while the
+   * Resource Calendar Guard is held, and validates endpoint identity, routing
+   * purpose, effective departure, freshness, and current provider policy.
+   */
+  public function accepts(
+    RouteEstimate $estimate,
+    string $origin,
+    string $destination,
+    int $departureAt,
+  ): bool;
 
 }

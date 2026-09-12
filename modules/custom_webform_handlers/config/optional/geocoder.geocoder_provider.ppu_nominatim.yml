@@ -1,0 +1,60 @@
+# The self-hosted Nominatim geocoder this project resolves committed delivery
+# addresses through. Ships in config/optional/, not config/install/, because
+# geocoder is deliberately not a declared dependency in
+# custom_webform_handlers.info.yml: booking, planning and checkout all work
+# without a geocoder, and declaring it would turn an optional integration into
+# an install-time requirement. Core filters optional config whose entity type is
+# absent (ConfigInstaller::installOptionalConfig()), so on a site without
+# geocoder this file is skipped rather than written as an inert raw config
+# object.
+#
+# Keyless by construction. Nominatim's HTTP API takes no credential, which is
+# why this provenance was chosen: Task 20A recorded that a self-hosted geocoder
+# under this project's operation is the only source permitted to persist a
+# coordinate, pass it to another provider, and render it on a non-origin map.
+# Nothing here needs to be kept out of version control.
+#
+# rootUrl names a DDEV-internal service, not a public endpoint: the API has no
+# authentication of any kind, so .ddev/docker-compose.nominatim.yaml exposes
+# 8080 to the project network only. Override it per environment from
+# settings.php --
+#   $config['geocoder.geocoder_provider.ppu_nominatim']['configuration']['rootUrl']
+# -- rather than editing this file, so the shipped value stays the reproducible
+# one.
+#
+# The dataset pin in userAgent is the same string as the deployment record's
+# data_version. Provisioning, refresh procedure and the shared-PBF contract with
+# the future OSRM service are in
+# docs/architecture/task20-geocoder-deployment.md.
+langcode: en
+status: true
+dependencies: {  }
+id: ppu_nominatim
+label: 'PPU self-hosted Nominatim (nyc-metro pin)'
+plugin: nominatim
+configuration:
+  # Stated rather than omitted. The plugin annotation's 2s/1req is only a form
+  # default and encodes the *public* instance's usage policy; at runtime
+  # ConfigurableProviderUsingHandlerWithAdapterBase reads the throttle from this
+  # configuration alone, so an absent key means no throttle at all. This
+  # instance is ours, so the public policy does not apply -- but a bound remains
+  # so a runaway loop cannot saturate the local database. A quote needs two
+  # lookups, so 20 per second never delays a legitimate request.
+  throttle:
+    period: 1
+    limit: 20
+  # Sent as Accept-Language. Fixed rather than inherited from the interface
+  # language so one address cannot resolve, and cache, differently for a visitor
+  # browsing in another language.
+  geocoder:
+    locale: en
+  rootUrl: 'http://nominatim:8080'
+  # Must be non-empty: Geocoder\Provider\Nominatim\Nominatim throws
+  # InvalidArgument on an empty User-Agent. Carrying the dataset pin here means
+  # this instance's own access log records which road graph answered, and it
+  # also changes ProviderBase::getCacheId(), which hashes the serialized
+  # configuration -- see the refresh procedure in the deployment record.
+  userAgent: 'PPU Dispatch self-hosted Nominatim (dataset nycmetro-20260904T202121Z+md5.77b0c1c4)'
+  # Empty on purpose: a Referer would name this site to a server that is this
+  # site, and the vendor provider defaults it to an empty string.
+  referer: ''

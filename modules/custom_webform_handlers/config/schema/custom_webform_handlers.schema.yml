@@ -2,6 +2,9 @@ custom_webform_handlers.settings:
   type: config_object
   label: 'Distance Calculator settings'
   mapping:
+    google_maps_browser_enabled:
+      type: boolean
+      label: 'Whether the Google route map preview is enabled'
     google_maps_browser_api_key:
       type: string
       label: 'Google Maps browser API key'
@@ -29,6 +32,73 @@ custom_webform_handlers.settings:
     preview_rate_limit:
       type: integer
       label: 'Distance preview requests allowed per hour and IP address'
+    preview_debounce_ms:
+      type: integer
+      label: 'Milliseconds an address edit must settle before a preview is requested'
+    # Multi-provider routing. Deliberately a sibling of the route_* keys above rather
+    # than a replacement for them: those keys still own Google's timeout and its two
+    # cache lifetimes, and this subtree defers to them so that a Google timing has one
+    # place to change. Not to be confused with custom_webform_handlers.dispatch's own
+    # `routing` mapping, which decides whether a non-traffic duration may be scheduled
+    # against — a different question, with its own owner.
+    routing:
+      type: mapping
+      label: 'Multi-provider routing policy'
+      mapping:
+        billing_period:
+          type: string
+          label: 'Allowance period, either day or month'
+        billing_timezone:
+          type: string
+          label: 'Timezone an allowance period rolls over in, never the visitor''s'
+        geocoder:
+          type: mapping
+          label: 'Coordinate resolution'
+          mapping:
+            provider:
+              type: string
+              label: 'Geocoder machine name, or empty when none is selected'
+            version:
+              type: string
+              label: 'Operator-recorded geocoder data version'
+            persist:
+              type: boolean
+              label: 'Whether resolved coordinates may be stored beyond the request'
+            request_allowance:
+              type: integer
+              label: 'Geocoding requests permitted per period, where 0 permits none'
+        purposes:
+          type: mapping
+          label: 'Provider chain per purpose'
+          mapping:
+            ordinary:
+              type: custom_webform_handlers.routing_purpose
+              label: 'Preview, distance-based price, and non-traffic scheduling'
+            offer:
+              type: custom_webform_handlers.routing_purpose
+              label: 'Public Slot offers and the warming that fills their cache'
+            final:
+              type: custom_webform_handlers.routing_purpose
+              label: 'Validated final booking operations'
+        # One named type per provider, and not a single reusable provider type, because
+        # the three providers do not have the same settings. OSRM has an endpoint
+        # allowlist and no request allowance at all; Mapbox has a second profile and a
+        # caching-terms acknowledgement; Google has neither. A shared type would have to
+        # declare every key as optional on every provider, which would let an allowance
+        # be typed against the one provider that bills nothing per request.
+        providers:
+          type: mapping
+          label: 'Per-provider settings'
+          mapping:
+            osrm:
+              type: custom_webform_handlers.routing_provider_osrm
+              label: 'Self-hosted OSRM'
+            mapbox:
+              type: custom_webform_handlers.routing_provider_mapbox
+              label: 'Mapbox Directions'
+            google_routes:
+              type: custom_webform_handlers.routing_provider_google
+              label: 'Google Routes'
     quote:
       type: mapping
       label: 'Quote calculation settings'
@@ -160,6 +230,161 @@ custom_webform_handlers.settings:
               sequence:
                 type: integer
                 label: 'Surcharge in cents'
+
+# One purpose's chain. `order` is a sequence and not a set of per-provider weights,
+# because failover order is the whole point: the first provider that answers wins, and
+# a weight map makes "which one is asked second" an emergent property instead of a
+# stated one.
+custom_webform_handlers.routing_purpose:
+  type: mapping
+  label: 'Routing purpose'
+  mapping:
+    order:
+      type: sequence
+      label: 'Providers to ask, in the order they will be asked'
+      sequence:
+        type: string
+        label: 'Provider machine name: osrm, mapbox or google_routes'
+    deadline_ms:
+      type: integer
+      label: 'Milliseconds the whole chain may spend on this purpose'
+    request_allowance:
+      type: sequence
+      label: 'Share of each provider''s allowance this purpose alone may spend'
+      sequence:
+        type: integer
+        label: 'Requests permitted per period, where 0 permits none'
+
+# Self-hosted OSRM. Carries no request_allowance key: a private extract bills nothing
+# per request, so there is no allowance to reserve and no period to reset. What limits
+# it is its own host, expressed as a timeout and a breaker.
+custom_webform_handlers.routing_provider_osrm:
+  type: mapping
+  label: 'Self-hosted OSRM provider'
+  mapping:
+    enabled:
+      type: boolean
+      label: 'Whether this provider may be asked'
+    allowed_schemes:
+      type: sequence
+      label: 'Schemes the configured endpoint may use'
+      sequence:
+        type: string
+        label: 'Either http or https'
+    allowed_hosts:
+      type: sequence
+      label: 'Hosts the configured endpoint may name'
+      sequence:
+        type: string
+        label: 'Host name, without scheme, port or path'
+    profile:
+      type: string
+      label: 'OSRM profile name'
+    timeout_ms:
+      type: integer
+      label: 'Milliseconds this provider may take'
+    cache_results:
+      type: boolean
+      label: 'Whether route results may be stored'
+    cache_ttl:
+      type: integer
+      label: 'Seconds a stored result stays usable'
+    data_version:
+      type: string
+      label: 'Operator-recorded extract version, part of cache identity'
+    circuit_failure_threshold:
+      type: integer
+      label: 'Consecutive faults that open the breaker'
+    circuit_cooldown_seconds:
+      type: integer
+      label: 'Seconds an open breaker stays open'
+    circuit_half_open_probes:
+      type: integer
+      label: 'Probes permitted while the breaker is half open'
+
+# Mapbox Directions. Two profiles, because the traffic-aware profile is a different
+# product and the purpose decides which one is asked for; and a separate acknowledgement
+# that the operator's own terms permit storing results, which cache_results is ANDed
+# with. Task 20A read the published terms and could not establish that right, so it is
+# asserted deliberately rather than assumed by a default.
+custom_webform_handlers.routing_provider_mapbox:
+  type: mapping
+  label: 'Mapbox Directions provider'
+  mapping:
+    enabled:
+      type: boolean
+      label: 'Whether this provider may be asked'
+    profile:
+      type: string
+      label: 'Profile for time-independent routes'
+    traffic_profile:
+      type: string
+      label: 'Profile for departure-stamped routes'
+    timeout_ms:
+      type: integer
+      label: 'Milliseconds this provider may take'
+    cache_results:
+      type: boolean
+      label: 'Whether route results may be stored'
+    cache_terms_recorded:
+      type: boolean
+      label: 'Operator confirms their Mapbox terms permit storing results'
+    cache_ttl:
+      type: integer
+      label: 'Seconds a stored result stays usable'
+    data_version:
+      type: string
+      label: 'Operator-recorded dataset version, part of cache identity'
+    circuit_failure_threshold:
+      type: integer
+      label: 'Consecutive faults that open the breaker'
+    circuit_cooldown_seconds:
+      type: integer
+      label: 'Seconds an open breaker stays open'
+    circuit_half_open_probes:
+      type: integer
+      label: 'Probes permitted while the breaker is half open'
+    request_allowance:
+      type: integer
+      label: 'Requests permitted per period across all purposes, where 0 permits none'
+
+# Google Routes. No profile and no timing values of its own: timeout_ms and cache_ttl
+# carry 0, which means "read the existing route_request_timeout, route_cache_ttl and
+# route_scheduled_cache_ttl keys". Those keys are in service today and already clamped
+# inside the adapter, so restating their values here would create a second answer to a
+# live question — the shape of defect that made the quote and Slot surfaces contradict
+# each other in Task 5D.
+custom_webform_handlers.routing_provider_google:
+  type: mapping
+  label: 'Google Routes provider'
+  mapping:
+    enabled:
+      type: boolean
+      label: 'Whether this provider may be asked'
+    timeout_ms:
+      type: integer
+      label: 'Milliseconds this provider may take, or 0 to use route_request_timeout'
+    cache_results:
+      type: boolean
+      label: 'Whether route results may be stored'
+    cache_ttl:
+      type: integer
+      label: 'Seconds a stored result stays usable, or 0 to use the route_*_cache_ttl keys'
+    data_version:
+      type: string
+      label: 'Operator-recorded dataset version, part of cache identity'
+    circuit_failure_threshold:
+      type: integer
+      label: 'Consecutive faults that open the breaker'
+    circuit_cooldown_seconds:
+      type: integer
+      label: 'Seconds an open breaker stays open'
+    circuit_half_open_probes:
+      type: integer
+      label: 'Probes permitted while the breaker is half open'
+    request_allowance:
+      type: integer
+      label: 'Requests permitted per period across all purposes, where 0 permits none'
 
 # Webform ships only a `webform.handler.*` fallback that types no keys, so every
 # setting this handler stores has to be declared here. Without it, strict config

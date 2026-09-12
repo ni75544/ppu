@@ -476,7 +476,15 @@
     let offerAbort = null;
     let pollTimer = null;
     let reofferTimer = null;
+    // The change listener bound directly to the date element, when the published
+    // field list does not already watch it. Held so `stop()` can release it.
+    let dateListener = null;
     let stopped = false;
+    // Set when the quote experience reports an address being edited, cleared
+    // when it reports a validated route. While it is set this widget sends
+    // nothing: a schedule route for a half-typed address is the same paid
+    // request as a preview for one, bought through a different endpoint.
+    let addressesDirty = false;
     // The selected arrival instant, or null. Never a token; never a Hold.
     let selection = null;
     let ui = null;
@@ -625,6 +633,11 @@
 
     async function requestOffers() {
       if (!ui || stopped) {
+        return;
+      }
+      // An address is mid-edit. The quote gate has not passed, so there is no
+      // committed route to schedule against.
+      if (addressesDirty) {
         return;
       }
       const date = currentDate();
@@ -1291,6 +1304,17 @@
         reofferTimer = null;
       }
       abortOffer();
+      listeners.forEach(([type, handler, capture]) => {
+        form.removeEventListener(type, handler, capture);
+      });
+      if (dateInput && dateListener) {
+        dateInput.removeEventListener('change', dateListener);
+        dateListener = null;
+      }
+    }
+
+    function onDateChanged() {
+      scheduleReoffer();
     }
 
     function onFormInput(event) {
@@ -1314,10 +1338,52 @@
 
     function onRouteValidated(event) {
       refreshDistance(event && event.detail ? event.detail.distance : null);
+      if (!addressesDirty) {
+        // A pricing-only refresh for the same route. The reoffer that the
+        // pricing edit already scheduled owns the request; asking again here
+        // would double every offer request.
+        return;
+      }
+      // The committed pair resolved. Normal date and item driven offers resume.
+      addressesDirty = false;
+      if (currentDate()) {
+        scheduleReoffer();
+      }
     }
 
     function onRouteCleared() {
       refreshDistance(null);
+    }
+
+    /**
+     * Suspends this widget while an address is being edited.
+     *
+     * Distinct from `route-cleared`, which also fires when a provider request
+     * fails for a pair that is still committed: that is not a dirty edit and
+     * must not suspend scheduling. Nothing is requested here — the selected
+     * arrival is dropped because the journey it was chosen for no longer exists.
+     */
+    function onAddressDirty(event) {
+      addressesDirty = true;
+      if (reofferTimer) {
+        window.clearTimeout(reofferTimer);
+        reofferTimer = null;
+      }
+      // Any answer now in flight was asked for the previous addresses.
+      offerSequence += 1;
+      abortOffer();
+      if (selection) {
+        clearSelection();
+      }
+      renderOffers([], null);
+      const message =
+        event && event.detail && event.detail.message
+          ? String(event.detail.message)
+          : Drupal.t(
+              'Finish entering your pickup and delivery addresses to see available arrival times.',
+            );
+      setStatus(message);
+      emitBookingState('waiting');
     }
 
     /**
@@ -1341,26 +1407,39 @@
     buildUi();
     adoptExistingSelection();
 
+    // Every listener this widget binds, so `stop()` can release each one with the
+    // same capture flag it was bound with.
+    const listeners = [
+      ['input', onFormInput, true],
+      ['change', onFormInput, true],
+      ['custom-webform-quote-updated', onQuoteChanged, false],
+      ['custom-webform-quote-cleared', onQuoteCleared, false],
+      ['custom-webform-route-validated', onRouteValidated, false],
+      ['custom-webform-route-cleared', onRouteCleared, false],
+      ['custom-webform-address-dirty', onAddressDirty, false],
+    ];
+    listeners.forEach(([type, handler, capture]) => {
+      form.addEventListener(type, handler, capture);
+    });
+
     // The date element is normally one of the watched value fields, so the
-    // form-level listener below already re-offers when it changes. This binds it
+    // form-level listener above already re-offers when it changes. This binds it
     // directly only when it is not watched, so the one control the widget depends
     // on still refreshes the times if the published field list ever omits it.
     if (dateInput && !watched.has(names.date)) {
-      dateInput.addEventListener('change', () => {
-        scheduleReoffer();
-      });
+      dateInput.addEventListener('change', onDateChanged);
+      dateListener = onDateChanged;
     }
-    form.addEventListener('input', onFormInput, true);
-    form.addEventListener('change', onFormInput, true);
-    form.addEventListener('custom-webform-quote-updated', onQuoteChanged);
-    form.addEventListener('custom-webform-quote-cleared', onQuoteCleared);
-    form.addEventListener('custom-webform-route-validated', onRouteValidated);
-    form.addEventListener('custom-webform-route-cleared', onRouteCleared);
 
     // A date is chosen and nothing is selected: keep the read fresh so a time the
     // server can no longer offer stops being shown. This only refreshes offers; a
     // live selection is never disturbed, and availability here is advisory.
     pollTimer = window.setInterval(() => {
+      // A hidden tab has nobody reading the times it would pay to refresh, and a
+      // dirty address has no committed route to refresh them against.
+      if (document.hidden || addressesDirty) {
+        return;
+      }
       if (!stopped && !selection && currentDate()) {
         requestOffers();
       }
@@ -1397,7 +1476,14 @@
         instances.set(form, setupForm(form, found.dispatch, found.bucket));
       });
     },
-    detach(context) {
+    detach(context, settings, trigger) {
+      // Only 'unload' means the form is going away. Drupal also detaches with
+      // 'serialize' before an AJAX submit; releasing the timers and listeners
+      // then would leave a form the response does not replace permanently
+      // stopped, because its `once` mark survives and attach skips it.
+      if (trigger !== 'unload') {
+        return;
+      }
       once
         .filter(ONCE_ID, FORM_SELECTOR, context)
         .forEach((form) => {
