@@ -1,0 +1,14 @@
+No syntax errors detected in ./custom_webform_handlers.install
+No syntax errors detected in ./src/Commerce/DispatchCheckoutManager.php
+No syntax errors detected in ./src/Controller/DistancePreviewController.php
+No syntax errors detected in ./src/Dispatch/DispatchCheckoutPlannerInterface.php
+No syntax errors detected in ./src/Dispatch/DispatchClaim.php
+No syntax errors detected in ./src/Dispatch/DispatchPlanner.php
+No syntax errors detected in ./src/Dispatch/DispatchReservationDetail.php
+No syntax errors detected in ./src/Dispatch/Storage/DatabaseReservationStore.php
+No syntax errors detected in ./src/Distance/FixedDevelopmentRouteProvider.php
+No syntax errors detected in ./src/Distance/GoogleRoutesDistanceProvider.php
+No syntax errors detected in ./src/Distance/RoutingModeEntryProvider.php
+No syntax errors detected in ./src/Distance/RoutingModeResolver.php
+No syntax errors detected in ./src/Plugin/WebformHandler/AddressDistanceHandler.php
+LINT_STATUS=0

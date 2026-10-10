@@ -1,0 +1,999 @@
+custom_webform_handlers.settings:
+  type: config_object
+  label: 'Distance Calculator settings'
+  mapping:
+    google_maps_browser_enabled:
+      type: boolean
+      label: 'Whether the Google route map preview is enabled'
+    google_maps_browser_api_key:
+      type: string
+      label: 'Google Maps browser API key'
+    route_request_timeout:
+      type: integer
+      label: 'Route request timeout in seconds'
+    route_cache_ttl:
+      type: integer
+      label: 'Route result cache lifetime in seconds'
+    route_scheduled_cache_ttl:
+      type: integer
+      label: 'Traffic-aware route cache lifetime in seconds'
+    route_traffic_model:
+      type: string
+      label: 'Traffic model for scheduled routes (BEST_GUESS, PESSIMISTIC, OPTIMISTIC)'
+    route_departure_bucket_seconds:
+      type: integer
+      label: 'Departure-time bucket for scheduled routes, in seconds'
+    route_departure_min_lead_seconds:
+      type: integer
+      label: 'Minimum seconds ahead of now a scheduled departure may be requested'
+    route_traffic_fallback_inflation_percent:
+      type: integer
+      label: 'Percentage added to a route duration that carries no traffic data'
+    preview_rate_limit:
+      type: integer
+      label: 'Distance preview requests allowed per hour and IP address'
+    preview_debounce_ms:
+      type: integer
+      label: 'Milliseconds an address edit must settle before a preview is requested'
+    routing_mode:
+      type: string
+      label: 'Customer routing mode (development_fixed or live_cached)'
+    # Multi-provider routing. Deliberately a sibling of the route_* keys above rather
+    # than a replacement for them: those keys still own Google's timeout and its two
+    # cache lifetimes, and this subtree defers to them so that a Google timing has one
+    # place to change. Not to be confused with custom_webform_handlers.dispatch's own
+    # `routing` mapping, which decides whether a non-traffic duration may be scheduled
+    # against — a different question, with its own owner.
+    routing:
+      type: mapping
+      label: 'Multi-provider routing policy'
+      mapping:
+        billing_period:
+          type: string
+          label: 'Allowance period, either day or month'
+        billing_timezone:
+          type: string
+          label: 'Timezone an allowance period rolls over in, never the visitor''s'
+        geocoder:
+          type: mapping
+          label: 'Coordinate resolution'
+          mapping:
+            provider:
+              type: string
+              label: 'Geocoder machine name, or empty when none is selected'
+            version:
+              type: string
+              label: 'Operator-recorded geocoder data version'
+            persist:
+              type: boolean
+              label: 'Whether resolved coordinates may be stored beyond the request'
+            request_allowance:
+              type: integer
+              label: 'Geocoding requests permitted per period, where 0 permits none'
+        purposes:
+          type: mapping
+          label: 'Provider chain per purpose'
+          mapping:
+            ordinary:
+              type: custom_webform_handlers.routing_purpose
+              label: 'Preview, distance-based price, and non-traffic scheduling'
+            offer:
+              type: custom_webform_handlers.routing_purpose
+              label: 'Public Slot offers and the warming that fills their cache'
+            final:
+              type: custom_webform_handlers.routing_purpose
+              label: 'Validated final booking operations'
+        # One named type per provider, and not a single reusable provider type, because
+        # the three providers do not have the same settings. OSRM has an endpoint
+        # allowlist and no request allowance at all; Mapbox has a second profile and a
+        # caching-terms acknowledgement; Google has neither. A shared type would have to
+        # declare every key as optional on every provider, which would let an allowance
+        # be typed against the one provider that bills nothing per request.
+        providers:
+          type: mapping
+          label: 'Per-provider settings'
+          mapping:
+            osrm:
+              type: custom_webform_handlers.routing_provider_osrm
+              label: 'Self-hosted OSRM'
+            mapbox:
+              type: custom_webform_handlers.routing_provider_mapbox
+              label: 'Mapbox Directions'
+            google_routes:
+              type: custom_webform_handlers.routing_provider_google
+              label: 'Google Routes'
+    quote:
+      type: mapping
+      label: 'Quote calculation settings'
+      mapping:
+        currency:
+          type: string
+          label: 'Currency code'
+        rate_version:
+          type: string
+          label: 'Rate version'
+        long_distance:
+          type: mapping
+          label: 'Long-distance rates'
+          mapping:
+            base_cents:
+              type: integer
+              label: 'Base charge in cents'
+            weight_distance_factor:
+              type: float
+              label: 'Dollar rate factor per pound-mile'
+            dimensional_weight_divisor:
+              type: integer
+              label: 'Dimensional weight divisor for measurements in inches'
+            fallback_weight_lbs:
+              type: mapping
+              label: 'Fallback shipment weights in pounds'
+              mapping:
+                studio: { type: integer, label: 'Studio' }
+                1_br: { type: integer, label: 'One bedroom' }
+                2_br: { type: integer, label: 'Two bedrooms' }
+                3_br: { type: integer, label: 'Three bedrooms' }
+                4_br_plus: { type: integer, label: 'Four or more bedrooms' }
+                few_items: { type: integer, label: 'Few items' }
+        local_residential:
+          type: mapping
+          label: 'Local residential rates'
+          mapping:
+            base_cents:
+              type: mapping
+              label: 'Base charges by move size'
+              mapping:
+                studio: { type: integer, label: 'Studio' }
+                1_br: { type: integer, label: 'One bedroom' }
+                2_br: { type: integer, label: 'Two bedrooms' }
+                3_br: { type: integer, label: 'Three bedrooms' }
+                4_br_plus: { type: integer, label: 'Four or more bedrooms' }
+                few_items: { type: integer, label: 'Few items' }
+            travel_speed_mph: { type: integer, label: 'Travel speed in miles per hour' }
+            travel_hourly_cents: { type: integer, label: 'Travel hourly charge in cents' }
+            round_trip_multiplier: { type: float, label: 'Round trip multiplier' }
+        fees:
+          type: mapping
+          label: 'Access and add-on fees'
+          mapping:
+            stairs_per_flight_cents: { type: integer, label: 'Stair fee per flight' }
+            passenger_elevator_cents: { type: integer, label: 'Passenger elevator fee' }
+            freight_elevator_cents: { type: integer, label: 'Freight elevator fee' }
+            long_carry_cents: { type: integer, label: 'Long carry fee' }
+            shuttle_cents: { type: integer, label: 'Shuttle fee' }
+            packing_cents: { type: integer, label: 'Packing fee' }
+            cleaning_cents: { type: integer, label: 'Cleaning fee' }
+        commercial:
+          type: mapping
+          label: 'Commercial move rates'
+          mapping:
+            base_cents: { type: integer, label: 'Base charge' }
+            distance_threshold_miles: { type: integer, label: 'Included distance in miles' }
+            excess_distance_cents_per_mile: { type: integer, label: 'Excess distance charge per mile' }
+            packing_unpacking_cents: { type: integer, label: 'Packing and unpacking fee' }
+            it_services_cents: { type: integer, label: 'IT services fee' }
+            furniture_assembly_cents: { type: integer, label: 'Furniture assembly fee' }
+            after_hours_percent: { type: integer, label: 'After-hours premium percentage' }
+            weekend_percent: { type: integer, label: 'Weekend premium percentage' }
+        specialty:
+          type: mapping
+          label: 'Specialty item rates'
+          mapping:
+            piano_cents: { type: integer, label: 'Piano fee' }
+            gun_safe_cents: { type: integer, label: 'Gun safe fee' }
+            fine_art_cents: { type: integer, label: 'Fine art fee' }
+            gym_equipment_cents: { type: integer, label: 'Gym equipment fee' }
+            other_cents: { type: integer, label: 'Other item fee' }
+        on_demand:
+          type: mapping
+          label: 'On-demand delivery rates'
+          mapping:
+            van_1_helper_cents: { type: integer, label: 'Van with one helper' }
+            truck_1_helper_cents: { type: integer, label: 'Truck with one helper' }
+            truck_2_helpers_cents: { type: integer, label: 'Truck with two helpers' }
+            rush_cents: { type: integer, label: 'Rush fee' }
+            expedited_cents: { type: integer, label: 'Expedited fee' }
+            included_miles: { type: integer, label: 'Included miles' }
+            excess_distance_cents_per_mile: { type: integer, label: 'Excess distance charge per mile' }
+        diy_truck:
+          type: mapping
+          label: 'DIY truck-rental rates'
+          mapping:
+            daily_base_cents:
+              type: mapping
+              label: 'Daily truck charges by size'
+              mapping:
+                10_ft: { type: integer, label: '10-foot truck' }
+                15_ft: { type: integer, label: '15-foot truck' }
+                20_ft: { type: integer, label: '20-foot truck' }
+                26_ft: { type: integer, label: '26-foot truck' }
+            included_miles_per_day: { type: integer, label: 'Included miles per day' }
+            excess_mileage_cents_per_mile: { type: integer, label: 'Excess mileage charge per mile' }
+            insurance_cents_per_day: { type: integer, label: 'Damage waiver per day' }
+            dolly_cents_per_day: { type: integer, label: 'Dolly charge per day' }
+            pads_cents_per_day: { type: integer, label: 'Furniture pads charge per day' }
+            labor_help_minimum_cents: { type: integer, label: 'Labor help minimum' }
+        courier:
+          type: mapping
+          label: 'Express Courier rates'
+          mapping:
+            base_cents: { type: integer, label: 'Express Courier base charge' }
+            included_miles: { type: integer, label: 'Miles included in the base charge' }
+            excess_distance_cents_per_mile: { type: integer, label: 'Excess-mile charge per mile' }
+            mode_surcharge_cents:
+              type: mapping
+              label: 'Surcharge by Delivery Mode machine value'
+              mapping:
+                courier_send: { type: integer, label: 'Send surcharge' }
+                courier_receive: { type: integer, label: 'Receive surcharge' }
+                courier_store_pickup: { type: integer, label: 'Store Pickup surcharge' }
+            urgency_surcharge_cents:
+              type: sequence
+              label: 'Optional surcharge by urgency machine value'
+              sequence:
+                type: integer
+                label: 'Surcharge in cents'
+
+# One purpose's chain. `order` is a sequence and not a set of per-provider weights,
+# because failover order is the whole point: the first provider that answers wins, and
+# a weight map makes "which one is asked second" an emergent property instead of a
+# stated one.
+custom_webform_handlers.routing_purpose:
+  type: mapping
+  label: 'Routing purpose'
+  mapping:
+    order:
+      type: sequence
+      label: 'Providers to ask, in the order they will be asked'
+      sequence:
+        type: string
+        label: 'Provider machine name: osrm, mapbox or google_routes'
+    deadline_ms:
+      type: integer
+      label: 'Milliseconds the whole chain may spend on this purpose'
+    request_allowance:
+      type: sequence
+      label: 'Share of each provider''s allowance this purpose alone may spend'
+      sequence:
+        type: integer
+        label: 'Requests permitted per period, where 0 permits none'
+
+# Self-hosted OSRM. Carries no request_allowance key: a private extract bills nothing
+# per request, so there is no allowance to reserve and no period to reset. What limits
+# it is its own host, expressed as a timeout and a breaker.
+custom_webform_handlers.routing_provider_osrm:
+  type: mapping
+  label: 'Self-hosted OSRM provider'
+  mapping:
+    enabled:
+      type: boolean
+      label: 'Whether this provider may be asked'
+    allowed_schemes:
+      type: sequence
+      label: 'Schemes the configured endpoint may use'
+      sequence:
+        type: string
+        label: 'Either http or https'
+    allowed_hosts:
+      type: sequence
+      label: 'Hosts the configured endpoint may name'
+      sequence:
+        type: string
+        label: 'Host name, without scheme, port or path'
+    profile:
+      type: string
+      label: 'OSRM profile name'
+    timeout_ms:
+      type: integer
+      label: 'Milliseconds this provider may take'
+    cache_results:
+      type: boolean
+      label: 'Whether route results may be stored'
+    cache_ttl:
+      type: integer
+      label: 'Seconds a stored result stays usable'
+    data_version:
+      type: string
+      label: 'Operator-recorded extract version, part of cache identity'
+    circuit_failure_threshold:
+      type: integer
+      label: 'Consecutive faults that open the breaker'
+    circuit_cooldown_seconds:
+      type: integer
+      label: 'Seconds an open breaker stays open'
+    circuit_half_open_probes:
+      type: integer
+      label: 'Probes permitted while the breaker is half open'
+
+# Mapbox Directions. Two profiles, because the traffic-aware profile is a different
+# product and the purpose decides which one is asked for; and a separate acknowledgement
+# that the operator's own terms permit storing results, which cache_results is ANDed
+# with. Task 20A read the published terms and could not establish that right, so it is
+# asserted deliberately rather than assumed by a default.
+custom_webform_handlers.routing_provider_mapbox:
+  type: mapping
+  label: 'Mapbox Directions provider'
+  mapping:
+    enabled:
+      type: boolean
+      label: 'Whether this provider may be asked'
+    profile:
+      type: string
+      label: 'Profile for time-independent routes'
+    traffic_profile:
+      type: string
+      label: 'Profile for departure-stamped routes'
+    timeout_ms:
+      type: integer
+      label: 'Milliseconds this provider may take'
+    cache_results:
+      type: boolean
+      label: 'Whether route results may be stored'
+    cache_terms_recorded:
+      type: boolean
+      label: 'Operator confirms their Mapbox terms permit storing results'
+    cache_ttl:
+      type: integer
+      label: 'Seconds a stored result stays usable'
+    data_version:
+      type: string
+      label: 'Operator-recorded dataset version, part of cache identity'
+    circuit_failure_threshold:
+      type: integer
+      label: 'Consecutive faults that open the breaker'
+    circuit_cooldown_seconds:
+      type: integer
+      label: 'Seconds an open breaker stays open'
+    circuit_half_open_probes:
+      type: integer
+      label: 'Probes permitted while the breaker is half open'
+    request_allowance:
+      type: integer
+      label: 'Requests permitted per period across all purposes, where 0 permits none'
+
+# Google Routes. No profile and no timing values of its own: timeout_ms and cache_ttl
+# carry 0, which means "read the existing route_request_timeout, route_cache_ttl and
+# route_scheduled_cache_ttl keys". Those keys are in service today and already clamped
+# inside the adapter, so restating their values here would create a second answer to a
+# live question — the shape of defect that made the quote and Slot surfaces contradict
+# each other in Task 5D.
+custom_webform_handlers.routing_provider_google:
+  type: mapping
+  label: 'Google Routes provider'
+  mapping:
+    enabled:
+      type: boolean
+      label: 'Whether this provider may be asked'
+    timeout_ms:
+      type: integer
+      label: 'Milliseconds this provider may take, or 0 to use route_request_timeout'
+    cache_results:
+      type: boolean
+      label: 'Whether route results may be stored'
+    cache_ttl:
+      type: integer
+      label: 'Seconds a stored result stays usable, or 0 to use the route_*_cache_ttl keys'
+    data_version:
+      type: string
+      label: 'Operator-recorded dataset version, part of cache identity'
+    circuit_failure_threshold:
+      type: integer
+      label: 'Consecutive faults that open the breaker'
+    circuit_cooldown_seconds:
+      type: integer
+      label: 'Seconds an open breaker stays open'
+    circuit_half_open_probes:
+      type: integer
+      label: 'Probes permitted while the breaker is half open'
+    request_allowance:
+      type: integer
+      label: 'Requests permitted per period across all purposes, where 0 permits none'
+
+# Webform ships only a `webform.handler.*` fallback that types no keys, so every
+# setting this handler stores has to be declared here. Without it, strict config
+# schema checking refuses to save any Webform that uses the handler.
+webform.handler.address_distance_handler:
+  type: mapping
+  label: 'Address and Distance Calculator handler settings'
+  mapping:
+    origin_address_field:
+      type: string
+      label: 'Origin address element'
+    destination_address_field:
+      type: string
+      label: 'Destination address element'
+    distance_field:
+      type: string
+      label: 'Distance element'
+    distance_meters_field:
+      type: string
+      label: 'Distance in meters element'
+    quote_total_field:
+      type: string
+      label: 'Quote total element'
+    quote_currency_field:
+      type: string
+      label: 'Quote currency element'
+    quote_breakdown_field:
+      type: string
+      label: 'Quote breakdown element'
+    quote_status_field:
+      type: string
+      label: 'Quote status element'
+    quote_rate_version_field:
+      type: string
+      label: 'Quote rate version element'
+    reservation_enabled:
+      type: boolean
+      label: 'Enable time-slot reservations'
+    reservation_date_field:
+      type: string
+      label: 'Reservation date element'
+    reservation_time_field:
+      type: string
+      label: 'Reservation time element'
+    reservation_hold_token_field:
+      type: string
+      label: 'Reservation hold token element'
+    reservation_resource_field:
+      type: string
+      label: 'Reservation resource element'
+    reservation_timezone:
+      type: string
+      label: 'Reservation timezone'
+    reservation_duration_minutes:
+      type: integer
+      label: 'Reservation slot duration in minutes'
+    reservation_hold_seconds:
+      type: integer
+      label: 'Reservation hold lifetime in seconds'
+    reservation_booking_window_days:
+      type: integer
+      label: 'Reservation booking window in days'
+    reservation_allowed_weekdays:
+      type: sequence
+      label: 'Reservation weekdays open for booking'
+      sequence:
+        type: integer
+        label: 'ISO-8601 weekday'
+    # Dispatch Planner. Only the switch and the elements it reads live here: every
+    # scheduling rule belongs to the Resource's operating profile below, not to one
+    # Webform, so a second form cannot be given a different idea of the same
+    # driver's day.
+    dispatch_enabled:
+      type: boolean
+      label: 'Enable the Dispatch Planner'
+    dispatch_slot_field:
+      type: string
+      label: 'Dispatch arrival element'
+    dispatch_hold_token_field:
+      type: string
+      label: 'Dispatch hold marker element'
+    dispatch_date_field:
+      type: string
+      label: 'Dispatch date element'
+    dispatch_legacy_time_field:
+      type: string
+      label: 'Superseded fixed-time preference element'
+
+# Dispatch Planner operating profile. A separate config object from the quote
+# settings above, so scheduling policy and pricing policy stay independent.
+custom_webform_handlers.dispatch:
+  type: config_object
+  label: 'Dispatch Planner settings'
+  mapping:
+    # Which Webform element answers each operational fact the planner reasons
+    # about. It lives here rather than on the handler because the vocabulary the
+    # planner compares these values against — self-bookable services, Manual
+    # Review markers, per-add-on minutes — also lives here: a mapping and the
+    # vocabulary it feeds have to move together or a configured rule silently
+    # stops matching.
+    #
+    # An unmapped fact is unknown, never a permissive default. The eligibility
+    # rules route unknown to Manual Review, so leaving a key empty costs a staff
+    # review rather than an unschedulable booking.
+    request_fields:
+      type: mapping
+      label: 'Element supplying each dispatch fact'
+      mapping:
+        # The calendar date the customer asked for, as a plain Y-m-d string in the
+        # Resource timezone. This is the only date the planner will plan: the offer
+        # endpoint derives its day from this element rather than trusting the day
+        # named in the request body, so a date the submission cannot later prove is
+        # refused instead of being answered with times.
+        requested_date:
+          type: string
+          label: 'Requested service date element'
+        service_type:
+          type: string
+          label: 'Service type element'
+        delivery_mode:
+          type: string
+          label: 'Courier delivery mode element'
+        declared_weight:
+          type: string
+          label: 'Declared weight element'
+        declared_weight_unit:
+          type: string
+          label: 'Declared weight unit element'
+        single_driver_handling:
+          type: string
+          label: 'Single-driver handling element'
+        # The prohibited-contents affirmation. Two keys because two controls can
+        # carry it and they do not share a vocabulary: the checkbox is read for
+        # truthiness, the older radio only for its one affirming option value.
+        contents_attestation:
+          type: string
+          label: 'Prohibited-contents attestation checkbox element'
+        contents_attestation_legacy:
+          type: string
+          label: 'Prohibited-contents radio element (historic submissions)'
+        vehicle_helper_needs:
+          type: string
+          label: 'Vehicle and helper needs element'
+        # Lists, because more than one element can answer them. Values are read
+        # verbatim from every element named here.
+        add_ons:
+          type: sequence
+          label: 'Elements answering add-on selections'
+          sequence:
+            type: string
+            label: 'Element key'
+        handling_flags:
+          type: sequence
+          label: 'Elements answering handling markers'
+          sequence:
+            type: string
+            label: 'Element key'
+        move_size:
+          type: string
+          label: 'Move size element'
+        origin_stairs_flights:
+          type: string
+          label: 'Origin stair flights element'
+        destination_stairs_flights:
+          type: string
+          label: 'Destination stair flights element'
+        origin_access:
+          type: string
+          label: 'Origin access conditions element'
+        destination_access:
+          type: string
+          label: 'Destination access conditions element'
+        parking_situation:
+          type: string
+          label: 'Parking situation element'
+        specialty_item_count:
+          type: string
+          label: 'Specialty item count element'
+        store_pickup_paid_and_ready:
+          type: string
+          label: 'Store Pickup paid-and-ready element'
+    resource:
+      type: mapping
+      label: 'Initial Resource Profile'
+      mapping:
+        id:
+          type: string
+          label: 'Resource identifier'
+        capacity:
+          type: integer
+          label: 'Concurrent Dispatch Windows per Resource'
+        timezone:
+          type: string
+          label: 'Scheduling timezone'
+        depot_address:
+          type: string
+          label: 'Depot address'
+        grid_minutes:
+          type: integer
+          label: 'Pickup-arrival grid in minutes'
+        working_hours:
+          type: sequence
+          label: 'Working hours by ISO-8601 weekday'
+          sequence:
+            type: mapping
+            label: 'Local working interval'
+            mapping:
+              start:
+                type: string
+                label: 'Local start time'
+              end:
+                type: string
+                label: 'Local end time'
+        breaks:
+          type: sequence
+          label: 'Unavailable intervals inside working hours'
+          sequence:
+            type: mapping
+            label: 'Local break interval'
+            mapping:
+              start:
+                type: string
+                label: 'Local start time'
+              end:
+                type: string
+                label: 'Local end time'
+        blackout_dates:
+          type: sequence
+          label: 'Local dates offering nothing'
+          sequence:
+            type: string
+            label: 'Local date'
+        repositioning_buffer_minutes:
+          type: integer
+          label: 'Repositioning buffer in minutes'
+        operational_buffer_minutes:
+          type: integer
+          label: 'Operational buffer in minutes'
+        booking_horizon_days:
+          type: integer
+          label: 'Booking horizon in days'
+        return_to_base:
+          type: boolean
+          label: 'Require return to base within working hours'
+    booking_profiles:
+      type: mapping
+      label: 'Per-service booking profiles'
+      mapping:
+        selected_slot_field:
+          type: string
+          label: 'Canonical selected-Slot element key'
+        eligibility_policy:
+          type: string
+          label: 'Service id of the policy that assesses self-bookable services'
+        services:
+          type: sequence
+          label: 'Booking profile per service machine value'
+          sequence:
+            type: mapping
+            label: 'Booking profile'
+            mapping:
+              mode:
+                type: string
+                label: 'Booking mode: self_bookable or manual_review'
+              duration_resolver:
+                type: string
+                label: 'Duration resolver identity: courier, move, or empty for none'
+              quote_strategy:
+                type: string
+                label: 'Price book key under settings quote'
+              claims_capacity:
+                type: boolean
+                label: 'Consumes the shared resource capacity'
+              single_driver_service:
+                type: boolean
+                label: 'One-driver handling is true by definition of the service'
+              review_policy:
+                type: string
+                label: 'Public review copy: offer_assessed or always_review'
+              review_message:
+                type: string
+                label: 'Fixed public sentence for an always-reviewed service'
+              required_facts:
+                type: sequence
+                label: 'Request field names whose absence leaves a request unfinished'
+                sequence:
+                  type: string
+                  label: 'Request field name'
+    self_bookable:
+      type: mapping
+      label: 'Self-service booking eligibility'
+      mapping:
+        service_types:
+          type: sequence
+          label: 'Self-bookable service machine values'
+          sequence:
+            type: string
+            label: 'Service machine value'
+        delivery_modes:
+          type: sequence
+          label: 'Self-bookable Courier delivery mode machine values'
+          sequence:
+            type: string
+            label: 'Delivery mode machine value'
+        max_package_lbs:
+          type: integer
+          label: 'Maximum self-bookable package weight in pounds'
+        require_declared_weight:
+          type: boolean
+          label: 'Require a declared weight'
+        require_single_driver_handling:
+          type: boolean
+          label: 'Require single-driver handling'
+        single_driver_service_types:
+          type: sequence
+          label: 'Service machine values that are one-driver services by definition'
+          sequence:
+            type: string
+            label: 'Service machine value'
+        require_contents_attestation:
+          type: boolean
+          label: 'Require the prohibited-contents attestation'
+        store_pickup_requires_paid_and_ready:
+          type: boolean
+          label: 'Require Store Pickup items to be paid for and ready'
+    manual_review:
+      type: mapping
+      label: 'Conditions routed to Manual Review'
+      mapping:
+        service_types:
+          type: sequence
+          label: 'Service machine values that always need staff approval'
+          sequence:
+            type: string
+            label: 'Service machine value'
+        vehicle_helper_needs:
+          type: sequence
+          label: 'Helper machine values implying multi-person work'
+          sequence:
+            type: string
+            label: 'Vehicle and helper machine value'
+        handling_flags:
+          type: sequence
+          label: 'Handling markers forcing Manual Review'
+          sequence:
+            type: string
+            label: 'Handling flag'
+    routing:
+      type: mapping
+      label: 'How the planner treats route figures'
+      mapping:
+        require_traffic_aware:
+          type: boolean
+          label: 'Refuse to schedule against a route with no traffic data behind it'
+    holds:
+      type: mapping
+      label: 'Dispatch Hold lifetime'
+      mapping:
+        hold_seconds:
+          type: integer
+          label: 'How long a Dispatch Hold reserves capacity, in seconds'
+    durations:
+      type: mapping
+      label: 'Server-side work durations'
+      mapping:
+        pickup_work_minutes:
+          type: integer
+          label: 'Fallback pickup work in minutes'
+        delivery_work_minutes:
+          type: integer
+          label: 'Fallback delivery work in minutes'
+        pickup_promise_minutes:
+          type: integer
+          label: 'Width of the pickup arrival promise in minutes'
+        courier:
+          type: mapping
+          label: 'Express Courier dwell and window durations'
+          mapping:
+            pickup_handling_minutes:
+              type: integer
+              label: 'Express Courier pickup dwell in minutes'
+            delivery_handling_minutes:
+              type: integer
+              label: 'Express Courier delivery dwell in minutes'
+            store_pickup_dwell_minutes:
+              type: integer
+              label: 'Store Pickup counter dwell in minutes, replacing the pickup dwell; 0 uses the pickup dwell'
+            operational_buffer_minutes:
+              type: integer
+              label: 'Express Courier operational buffer in minutes; 0 uses the Resource Profile buffer'
+            promise_minutes:
+              type: integer
+              label: 'Express Courier pickup arrival promise width in minutes; 0 uses the global promise'
+            # Deliberately unmapped in the shipped profile. An Express Courier
+            # request that selects an add-on nobody has timed is not self-bookable:
+            # eligibility sends it to staff rather than letting the planner report
+            # it as a fully-booked day. Mapping an add-on here is how an operator
+            # re-enables self-booking for it.
+            add_on_minutes:
+              type: sequence
+              label: 'Minutes by Express Courier add-on machine value'
+              sequence:
+                type: integer
+                label: 'Minutes'
+        move:
+          type: mapping
+          label: 'Residential and local move durations'
+          mapping:
+            move_size_minutes:
+              type: sequence
+              label: 'Service minutes by move size machine value'
+              sequence:
+                type: integer
+                label: 'Minutes'
+            stairs_per_flight_minutes:
+              type: integer
+              label: 'Minutes added per flight of stairs'
+            access_minutes:
+              type: sequence
+              label: 'Minutes by access-condition machine value'
+              sequence:
+                type: integer
+                label: 'Minutes'
+            parking_minutes:
+              type: sequence
+              label: 'Minutes by parking-situation machine value'
+              sequence:
+                type: integer
+                label: 'Minutes'
+            specialty_item_minutes:
+              type: integer
+              label: 'Minutes added per specialty item'
+            add_on_minutes:
+              type: sequence
+              label: 'Minutes by add-on machine value'
+              sequence:
+                type: integer
+                label: 'Minutes'
+    # Which of the two public booking workflows may act for a Webform. This is the
+    # only stored input to that decision, and it is an allowlist rather than a
+    # switch: a Webform is served by the Dispatch Planner because an operator named
+    # it here, never because a handler checkbox happened to be ticked.
+    #
+    # It is deliberately one-directional. There is no 'legacy_webforms' counterpart,
+    # because the fixed-slot workflow is what every existing form already gets and a
+    # second list would create a state where both lists name the same form.
+    workflow:
+      type: mapping
+      label: 'Booking workflow ownership'
+      mapping:
+        dispatch_webforms:
+          type: sequence
+          label: 'Webforms transferred to the Dispatch Planner'
+          sequence:
+            type: string
+            label: 'Webform ID'
+
+    # Who the confirmed-booking path may contact. This is a Webform element name, not
+    # an address: nothing here stores customer data. It is declared on the dispatch
+    # object as well as on the notifications object below because two readers use it
+    # for two different decisions — the checkout starter needs a contact before it may
+    # open an order, and the notification composer needs one before it may send.
+    # Neither reads the other's copy, so neither can be dropped in favour of it.
+    recipients:
+      type: mapping
+      label: 'Contact resolution'
+      mapping:
+        customer_email_field:
+          type: string
+          label: 'Webform element holding the customer email'
+
+# Notifications are an integration around the confirmed planner state, never a source
+# of it. Nothing in this object can withhold capacity, move a Reservation, or change
+# what the calendar offers: it decides who is told about a fact that has already
+# committed, and in what words.
+custom_webform_handlers.notifications:
+  type: config_object
+  label: 'Dispatch notification settings'
+  mapping:
+    # Off until somebody configures a recipient. A default of TRUE would mean an
+    # install that has never opened this form starts mailing the site address the
+    # first time a booking is confirmed.
+    enabled:
+      type: boolean
+      label: 'Send dispatch notifications'
+    # Per-event, keyed by the stored DispatchEvent value. An event absent from this
+    # map is not sent, which is what allows a later release to add an event without
+    # silently starting to mail an existing site about it.
+    events:
+      type: sequence
+      label: 'Which committed facts are announced'
+      sequence:
+        type: boolean
+        label: 'Announce this event'
+    recipients:
+      type: mapping
+      label: 'Where notifications go'
+      mapping:
+        # One address or a comma-separated list. Staff mail carries operational facts
+        # about the Resource and the review queue, never another customer's detail.
+        staff:
+          type: string
+          label: 'Staff notification address'
+        # The Webform element holding the customer's own address. There is
+        # deliberately no fallback: a confirmation that cannot find this is not sent,
+        # because every alternative amounts to mailing somebody else.
+        customer_email_field:
+          type: string
+          label: 'Element holding the customer address'
+        # A line the business wants customers to be able to reach it on, substituted
+        # as [contact]. Administrator-authored text, so it is safe in a message in a
+        # way that a value read out of a submission would not be.
+        contact_line:
+          type: string
+          label: 'Contact line shown to customers'
+    # Keyed by event value, then by audience value. Both halves of a template must be
+    # non-empty or nothing is sent: mailing a blank message is a worse answer to a
+    # half-configured template than recording that nothing went out.
+    templates:
+      type: sequence
+      label: 'Message templates by event'
+      sequence:
+        type: sequence
+        label: 'Templates by audience'
+        sequence:
+          type: mapping
+          label: 'One message'
+          mapping:
+            subject:
+              type: string
+              label: 'Subject line'
+            body:
+              type: string
+              label: 'Message body'
+
+# The dispatch payment-process pane subclasses Commerce's own payment_process pane
+# and stores exactly its configuration — the capture flag — so it inherits that
+# pane's schema wholesale by referencing it as its type. Without this entry, strict
+# config schema checking would reject the dispatch checkout flow, which lists the
+# pane under its own id. The two plain dispatch panes (contact details, confirmation)
+# need no entry: they store only the base pane keys, which the
+# commerce_checkout.commerce_checkout_pane.* wildcard already types.
+commerce_checkout.commerce_checkout_pane.dispatch_payment_process:
+  type: commerce_checkout.commerce_checkout_pane.payment_process
+
+# The dispatch checkout flow plugin subclasses Commerce's own multistep_default and
+# adds no configuration of its own — it only moves when the order is placed — so it
+# stores exactly what a multistep flow with panes stores, and is typed as that.
+# Without this entry, strict config schema checking would reject the dispatch flow,
+# whose configuration is keyed by its plugin id.
+commerce_checkout.commerce_checkout_flow.plugin.dispatch_flow:
+  type: commerce_checkout_flow_with_panes_configuration
+  label: 'Dispatch checkout flow configuration'
+
+# Service Type popularity ranking. Four scalars, all of them presentation settings:
+# nothing here can change eligibility, capacity, price, or a booking in progress. Every
+# value is clamped where it is read rather than validated here, because a mistyped
+# number must degrade to the configured card order rather than break a public page —
+# config schema is a description of shape, and this feature's guarantees are about
+# behaviour under a bad value.
+custom_webform_handlers.ranking:
+  type: config_object
+  label: 'Service Type popularity ranking'
+  mapping:
+    enabled:
+      type: boolean
+      label: 'Let measured popularity reorder the service cards'
+    window_days:
+      type: integer
+      label: 'Rolling window in days'
+    minimum_samples:
+      type: integer
+      label: 'Minimum bookings before reordering'
+    cache_ttl:
+      type: integer
+      label: 'Cached order lifetime in seconds'
+
+# The one Views field handler in this module that carries options of its own, and
+# therefore the one that needs a schema entry: without it, strict config schema
+# checking would reject views.view.dispatch_reservations for the three keys below.
+#
+# The other four — dispatch_reservation_link, dispatch_protected_text,
+# dispatch_price_snapshot, dispatch_customer_contact — store nothing beyond what
+# every Views field stores, so core's 'views.field.*' fallback already describes
+# them exactly. What each of them renders is decided by the module's Views data and
+# by the reader's permissions, not by anything an administrator can type into the
+# view, which is deliberate: an option is a thing somebody can get wrong.
+views.field.dispatch_local_time:
+  type: views_field
+  label: 'Dispatch local time'
+  mapping:
+    dispatch_time_format:
+      type: string
+      label: 'Which parts of the instant to print: date, time, or both'
+    dispatch_window_end:
+      type: string
+      label: 'Column holding the closing instant, when this field prints a window'
+    dispatch_show_zone:
+      type: boolean
+      label: 'Name the timezone the instant was formatted in'
+
+# The Reservation Dashboard's access plugin. Unlike field plugins, access plugins
+# have no 'views.access.*' fallback in core — each one must be declared or strict
+# config schema checking rejects the view that uses it. It stores nothing: the
+# audience is the two permissions that already read the Dispatch board, fixed in
+# the plugin so it cannot drift from the board's own routes.
+views.access.dispatch_board_audience:
+  type: mapping
+  label: 'Dispatch board audience'

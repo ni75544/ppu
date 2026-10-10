@@ -64,6 +64,21 @@ final class QuoteResult {
   }
 
   /**
+   * Returns the priced line-item breakdown, in calculation order.
+   *
+   * Each entry is the shape QuoteCalculator::addLine() writes — code, label,
+   * integer amount_cents, decimal amount, and metadata. The list is the complete
+   * breakdown the total is the sum of, which is what lets a snapshot record the
+   * whole priced job rather than only its total.
+   *
+   * @return array<int, array<string, mixed>>
+   *   The line items, each with at least a 'code' and an 'amount_cents'.
+   */
+  public function lineItems(): array {
+    return $this->lineItems;
+  }
+
+  /**
    * Returns the public quote representation.
    *
    * @return array<string, mixed>

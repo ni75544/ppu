@@ -1,0 +1,15 @@
+{
+  "name": "ppu-dbhub-local",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Project-local, version-pinned @bytebase/dbhub runtime with a reproducible MariaDB connection-pool cap patch (connectionLimit=2, minimumIdle=0, idleTimeout=60). Authorized under Task 24B prerequisite. Upstream @bytebase/dbhub keeps its own LICENSE under node_modules; see README.md.",
+  "license": "SEE LICENSE IN node_modules/@bytebase/dbhub/LICENSE",
+  "scripts": {
+    "provision": "node provision.cjs",
+    "verify": "node provision.cjs --check",
+    "postinstall": "node provision.cjs"
+  },
+  "dependencies": {
+    "@bytebase/dbhub": "1.2.3"
+  }
+}

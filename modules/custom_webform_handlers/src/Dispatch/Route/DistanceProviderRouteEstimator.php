@@ -7,6 +7,8 @@ use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\custom_webform_handlers\Dispatch\RouteEstimate;
 use Drupal\custom_webform_handlers\Distance\DistanceProviderException;
 use Drupal\custom_webform_handlers\Distance\DistanceProviderInterface;
+use Drupal\custom_webform_handlers\Distance\FixedDevelopmentRouteProvider;
+use Drupal\custom_webform_handlers\Distance\RoutingModeResolver;
 use Drupal\custom_webform_handlers\Distance\RoutingPolicy;
 use Drupal\custom_webform_handlers\Distance\ScheduledRouteProviderInterface;
 use Psr\Log\LoggerInterface;
@@ -56,6 +58,16 @@ final class DistanceProviderRouteEstimator implements DispatchRouteEstimatorInte
    */
   private const DEFAULT_FALLBACK_PERCENT = 25;
 
+  /**
+   * The fixed development fact's reuse window, in seconds.
+   *
+   * A synthesized expiry: FixedDevelopmentRouteProvider carries none, but
+   * accepts() requires a non-NULL, future expiry before any prepared fact may be
+   * reused under a lock. One hour keeps a development fact honestly perishable —
+   * a stale one is refused and rebuilt, which is free — rather than eternal.
+   */
+  private const DEVELOPMENT_FIXED_TTL = 3600;
+
   public function __construct(
     private readonly DistanceProviderInterface $distanceProvider,
     private readonly ConfigFactoryInterface $configFactory,
@@ -63,6 +75,8 @@ final class DistanceProviderRouteEstimator implements DispatchRouteEstimatorInte
     private readonly string $purpose,
     private readonly TimeInterface $time,
     private readonly ?DistanceProviderInterface $ordinaryDistanceProvider = NULL,
+    private readonly ?RoutingModeResolver $routingModeResolver = NULL,
+    private readonly ?DistanceProviderInterface $developmentProvider = NULL,
   ) {}
 
   /**
@@ -74,6 +88,16 @@ final class DistanceProviderRouteEstimator implements DispatchRouteEstimatorInte
 
     if ($origin === '' || $destination === '') {
       return NULL;
+    }
+
+    // In development_fixed mode the scheduling chain must not be reached: its
+    // adapters fail closed at the socket, so calling it would only ever return
+    // NULL here and dispatch offers/slots would silently have no estimate. The
+    // deterministic development provider answers instead — no HTTP, an explicit
+    // development_fixed provider id, and a synthesized expiry so the fact is
+    // still perishable. Missing the provider fails closed (NULL), never a chain.
+    if ($this->routingModeResolver?->isDevelopmentFixed()) {
+      return $this->fixedDevelopmentEstimate($origin, $destination, $departureAt);
     }
 
     try {
@@ -151,6 +175,90 @@ final class DistanceProviderRouteEstimator implements DispatchRouteEstimatorInte
   }
 
   /**
+   * Builds a deterministic scheduling estimate without any network request.
+   *
+   * The development_fixed counterpart to the chain branch of estimate(). It asks
+   * the fixed development provider — never the offer/final/ordinary chain, whose
+   * adapters fail closed at the socket in this mode — and shapes the answer into
+   * a RouteEstimate the planner and its locked revalidation accept:
+   *
+   * - The provider id is the fixture's own (development_fixed), which accepts()
+   *   admits only while the resolver confirms the mode. It is never laundered
+   *   into a live provider id, so a fixture can never masquerade as real traffic.
+   * - Fixtures are time-independent: there is no effective departure, so that
+   *   field is NULL on both the produced fact and the fingerprint, and the
+   *   traffic-free duration is inflated by the same conservative margin the
+   *   chain branch applies rather than passed off as scheduled.
+   * - A fact carries a synthesized, finite expiry so it stays perishable under a
+   *   lock; a stale development fact is refused and rebuilt, which costs nothing.
+   *
+   * A missing development provider returns NULL — a leg that cannot be measured
+   * fails closed, exactly as an unmeasurable live leg does; it never falls
+   * through to a networked chain.
+   */
+  private function fixedDevelopmentEstimate(
+    string $origin,
+    string $destination,
+    int $departureAt,
+  ): ?RouteEstimate {
+    if ($this->developmentProvider === NULL) {
+      $this->logger->notice(
+        'Dispatch route estimate requested in development_fixed mode with no development provider wired; leg is unschedulable.',
+      );
+      return NULL;
+    }
+
+    try {
+      $result = $this->developmentProvider->calculate($origin, $destination);
+    }
+    catch (DistanceProviderException $exception) {
+      $this->logger->notice('Dispatch development route estimate unavailable: @code', [
+        '@code' => $exception->getMessage(),
+      ]);
+      return NULL;
+    }
+    catch (\Throwable $exception) {
+      $this->logger->error('Dispatch development route estimate failed with @type.', [
+        '@type' => get_class($exception),
+      ]);
+      return NULL;
+    }
+
+    $seconds = $result->durationSeconds();
+    if ($seconds <= 0) {
+      return NULL;
+    }
+    if (!$result->trafficAware()) {
+      $seconds = $this->inflate($seconds);
+    }
+
+    $now = $this->time->getCurrentTime();
+    $fingerprint = $this->fingerprint(
+      $origin,
+      $destination,
+      $departureAt,
+      NULL,
+      $result->provider(),
+      $result->endpointFingerprint(),
+    );
+
+    return new RouteEstimate(
+      $seconds,
+      $result->distanceMeters(),
+      $departureAt,
+      $result->trafficAware(),
+      $this->purpose,
+      $result->provider(),
+      $fingerprint,
+      $result->calculatedAt(),
+      $result->fetchedAt(),
+      $now + self::DEVELOPMENT_FIXED_TTL,
+      NULL,
+      $result->endpointFingerprint(),
+    );
+  }
+
+  /**
    * {@inheritdoc}
    */
   public function accepts(
@@ -173,6 +281,31 @@ final class DistanceProviderRouteEstimator implements DispatchRouteEstimatorInte
       || $estimate->expiresAt === NULL
       || $estimate->expiresAt <= $now) {
       return FALSE;
+    }
+
+    // A development_fixed fact is accepted only when the environment is actually
+    // in that mode, and only for the fixed provider's own id. The live provider
+    // allowlist (providerOrder()) never contains development_fixed, so without
+    // this branch a fixture fact would be rejected in dev and re-estimated on
+    // every locked revalidation. The perishability, purpose, departure, seconds
+    // and fingerprint checks above and below still apply — this narrows the
+    // provider gate, it does not relax freshness. Live eligibility is untouched:
+    // the bypass is unreachable unless isDevelopmentFixed() is TRUE. Fixtures are
+    // time-independent, so the effective departure they routed for is always NULL.
+    if ($this->routingModeResolver?->isDevelopmentFixed()
+      && $estimate->provider === FixedDevelopmentRouteProvider::PROVIDER_ID) {
+      return $estimate->effectiveDepartureAt === NULL
+        && hash_equals(
+          $estimate->routeFingerprint,
+          $this->fingerprint(
+            trim($origin),
+            trim($destination),
+            $departureAt,
+            NULL,
+            $estimate->provider,
+            $estimate->endpointFingerprint,
+          ),
+        );
     }
 
     try {

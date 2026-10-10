@@ -99,6 +99,7 @@ final class GoogleRoutesDistanceProvider implements DistanceProviderInterface, S
     private readonly LoggerInterface $logger,
     private readonly ?TimeInterface $time = NULL,
     private readonly bool $internalCacheEnabled = TRUE,
+    private readonly ?RoutingModeResolver $routingModeResolver = NULL,
   ) {}
 
   /**
@@ -137,6 +138,16 @@ final class GoogleRoutesDistanceProvider implements DistanceProviderInterface, S
    *   that does not describe a usable route.
    */
   private function route(string $origin, string $destination, ?int $departureAt): DistanceResult {
+    // Fail closed in development_fixed mode. If a caller is ever wired directly
+    // to this adapter instead of through the customer-route entry facade, it
+    // still cannot dial out: the mode is refused here, before any address
+    // handling, key read or request is attempted. NOT_CONFIGURED is a classified
+    // non-billing failure — not a provider fault — and one of the closed public
+    // codes js/distance_calculator.js already handles.
+    if ($this->routingModeResolver?->isDevelopmentFixed()) {
+      throw DistanceProviderException::classified(DistanceProviderException::NOT_CONFIGURED, 'google_routes');
+    }
+
     $origin = $this->normalizeAddress($origin);
     $destination = $this->normalizeAddress($destination);
     if ($origin === '' || $destination === '' || $origin === $destination) {

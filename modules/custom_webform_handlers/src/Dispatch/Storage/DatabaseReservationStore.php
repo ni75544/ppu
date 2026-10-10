@@ -68,6 +68,15 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
    *
    * The two hashes are excluded deliberately: nothing outside this class needs
    * them, and a column that is never selected cannot be leaked into a response.
+   *
+   * price_snapshot_id is read here — though not the other three price-snapshot
+   * columns — because the confirm path binds the accepted snapshot to the
+   * reservation under the lock (Task 24B / E09): LockedHold carries this identity so
+   * the locked revalidation can prove the accepted quote it is settling is the one
+   * this reservation was actually held for. It is an internal identity, never
+   * published; slotFromRow() and the value objects built from these fields expose no
+   * price. The amount, currency, and version stay out because nothing under the lock
+   * compares them — the payable-total check is the manager's pre-lock Commerce read.
    */
   const READ_FIELDS = [
     'dispatch_reservation_id',
@@ -84,6 +93,7 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
     'expires_at',
     'created',
     'changed',
+    'price_snapshot_id',
   ];
 
   /**
@@ -112,6 +122,7 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
     'price_snapshot_id',
     'price_snapshot_cents',
     'price_snapshot_currency',
+    'price_snapshot_version',
     'order_id',
   ];
 
@@ -135,6 +146,32 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
     private readonly ResourceCalendarGuard $guard,
     private readonly LoggerInterface $logger,
   ) {}
+
+  /**
+   * Lowest admission generation this store will persist (Task 24C-7A).
+   *
+   * Enrolment begins at one; zero is reserved to mean "no generation", which the
+   * NULL column already expresses, so a supplied zero is an invalid value rather
+   * than a weaker synonym for unenrolled.
+   */
+  const ADMISSION_GENERATION_MIN = 1;
+
+  /**
+   * Highest admission generation the physical column can hold (Task 24C-7A).
+   *
+   * The column is int(10) unsigned, so this is its ceiling. Validating against it
+   * here turns a silent out-of-range truncation into a clear refusal.
+   */
+  const ADMISSION_GENERATION_MAX = 4294967295;
+
+  /**
+   * Whether the admission_generation column exists, memoised per instance.
+   *
+   * NULL until first probed. Kept on the instance and never in a cache bin: a
+   * stale cached TRUE would make this store write a column a rolled-back migration
+   * had removed, and a stale FALSE would silently drop a generation.
+   */
+  private ?bool $hasAdmissionGenerationColumn = NULL;
 
   /**
    * {@inheritdoc}
@@ -166,6 +203,21 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
     if ($protectedEnd <= $protectedStart || $claim->window->endTimestamp <= $claim->window->startTimestamp) {
       // A window that does not move forward cannot be reasoned about at all.
       return HoldResult::refused(DispatchReason::InvalidRequest);
+    }
+
+    // Task 24C-7A: validate the admission generation as an input, before any guard
+    // lock or transaction is taken. Business callers never supply one, so this is
+    // reached only by a caller that explicitly set it: an out-of-range value is a
+    // programming error and throws, and an explicit generation on a schema that
+    // predates the column fails clearly here rather than being silently dropped by
+    // the insert. Passive transport only — nothing here consults or sets admission.
+    $this->assertGenerationInRange($claim->admissionGeneration);
+    if ($claim->admissionGeneration !== NULL && !$this->hasAdmissionGenerationColumn()) {
+      throw new \RuntimeException(sprintf(
+        'Admission generation %d was supplied but the %s table has no admission_generation column; refusing to persist.',
+        $claim->admissionGeneration,
+        self::TABLE,
+      ));
     }
 
     return $this->guard->withLockedDays(
@@ -213,31 +265,42 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
         $token = bin2hex(random_bytes(32));
         $expires = $now + max(1, $claim->holdSeconds);
 
+        $fields = [
+          'resource_id' => $resourceId,
+          'webform_id' => $claim->slot->webformId,
+          'submission_id' => NULL,
+          'state' => self::STATE_HELD,
+          'pickup_arrival' => $claim->slot->startTimestamp,
+          'timezone' => $claim->slot->timezone,
+          'window_start' => $claim->window->startTimestamp,
+          'window_end' => $claim->window->endTimestamp,
+          'inbound_reposition_seconds' => max(0, $claim->inboundRepositionSeconds),
+          'outbound_reposition_seconds' => max(0, $claim->outboundRepositionSeconds),
+          'pickup_location' => $claim->pickupLocation,
+          'delivery_location' => $claim->deliveryLocation,
+          'route_seconds' => $claim->routeSeconds,
+          'route_meters' => $claim->routeMeters,
+          'price_snapshot_id' => $claim->priceSnapshotId,
+          'price_snapshot_cents' => $claim->priceSnapshotCents,
+          'price_snapshot_currency' => $claim->priceSnapshotCurrency,
+          'price_snapshot_version' => $claim->priceSnapshotVersion,
+          'hold_token_hash' => $this->hash($token),
+          'owner_hash' => $this->hash($claim->ownerId),
+          'expires_at' => $expires,
+          'created' => $now,
+          'changed' => $now,
+        ];
+        // Task 24C-7A: a new Hold enrols in no admission generation, so the column
+        // is written only when a generation was explicitly supplied — which no
+        // business caller does — and only when the migrated column exists. Omitting
+        // it defaults the column to NULL (unenrolled) and keeps the insert
+        // compatible with a pre-10049 schema. The presence probe is memoised, so
+        // re-reading it here rather than threading it through the closure is cheap.
+        if ($this->hasAdmissionGenerationColumn() && $claim->admissionGeneration !== NULL) {
+          $fields['admission_generation'] = $claim->admissionGeneration;
+        }
         $this->database->insert(self::TABLE)
-          ->fields([
-            'resource_id' => $resourceId,
-            'webform_id' => $claim->slot->webformId,
-            'submission_id' => NULL,
-            'state' => self::STATE_HELD,
-            'pickup_arrival' => $claim->slot->startTimestamp,
-            'timezone' => $claim->slot->timezone,
-            'window_start' => $claim->window->startTimestamp,
-            'window_end' => $claim->window->endTimestamp,
-            'inbound_reposition_seconds' => max(0, $claim->inboundRepositionSeconds),
-            'outbound_reposition_seconds' => max(0, $claim->outboundRepositionSeconds),
-            'pickup_location' => $claim->pickupLocation,
-            'delivery_location' => $claim->deliveryLocation,
-            'route_seconds' => $claim->routeSeconds,
-            'route_meters' => $claim->routeMeters,
-            'price_snapshot_id' => $claim->priceSnapshotId,
-            'price_snapshot_cents' => $claim->priceSnapshotCents,
-            'price_snapshot_currency' => $claim->priceSnapshotCurrency,
-            'hold_token_hash' => $this->hash($token),
-            'owner_hash' => $this->hash($claim->ownerId),
-            'expires_at' => $expires,
-            'created' => $now,
-            'changed' => $now,
-          ])
+          ->fields($fields)
           ->execute();
 
         return HoldResult::held(new Hold($claim->slot, $token, $expires));
@@ -395,15 +458,21 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
         // The authoritative read. A Hold that lapsed, was released, was confirmed
         // against another submission, or never belonged to this owner is simply not
         // here, and no reason beyond hold_not_found is disclosed about it.
-        $locked = $this->database->select(self::TABLE, 'r')
+        $lockedQuery = $this->database->select(self::TABLE, 'r')
           ->fields('r', self::READ_FIELDS)
           ->condition('r.hold_token_hash', $this->hash($rawHoldToken))
           ->condition('r.owner_hash', $this->hash($rawOwnerId))
           ->condition('r.state', self::STATE_HELD)
           ->condition('r.expires_at', $now, '>')
-          ->range(0, 1)
-          ->execute()
-          ->fetchObject();
+          ->range(0, 1);
+        // Task 24C-7A: read the admission generation under the same lock as the rest
+        // of the row, but only when the migrated column exists, so a pre-10049
+        // schema still reads cleanly. The LockedHold built below keeps NULL when the
+        // column is absent or the row was never enrolled.
+        if ($this->hasAdmissionGenerationColumn()) {
+          $lockedQuery->addField('r', 'admission_generation');
+        }
+        $locked = $lockedQuery->execute()->fetchObject();
 
         if (!$locked) {
           return ReservationResult::refused(DispatchReason::HoldNotFound);
@@ -430,6 +499,14 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
           (int) $locked->outbound_reposition_seconds,
           (string) $locked->webform_id,
           (int) $locked->expires_at,
+          // The authoritative price-snapshot identity, read under the lock with the
+          // rest of the row. This is the copy the E09 binding trusts — the confirm
+          // path compares the accepted snapshot against THIS, not against anything
+          // carried in unlocked.
+          $locked->price_snapshot_id === NULL ? NULL : (string) $locked->price_snapshot_id,
+          // Task 24C-7A: present only when the locked read above selected it; isset
+          // keeps an unselected or NULL column as NULL (unenrolled), never zero.
+          isset($locked->admission_generation) ? (int) $locked->admission_generation : NULL,
         ));
 
         if (!$reason instanceof DispatchReason) {
@@ -490,15 +567,20 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
       return NULL;
     }
 
-    $row = $this->database->select(self::TABLE, 'r')
+    $query = $this->database->select(self::TABLE, 'r')
       ->fields('r', self::READ_FIELDS)
       ->condition('r.hold_token_hash', $this->hash($rawHoldToken))
       ->condition('r.owner_hash', $this->hash($rawOwnerId))
       ->condition('r.state', self::STATE_HELD)
       ->condition('r.expires_at', $this->time->getRequestTime(), '>')
-      ->range(0, 1)
-      ->execute()
-      ->fetchObject();
+      ->range(0, 1);
+    // Task 24C-7A: read the admission generation only when the migrated column
+    // exists, so a pre-10049 schema still reads cleanly; the LockedHold built below
+    // keeps NULL when the column is absent or the row was never enrolled.
+    if ($this->hasAdmissionGenerationColumn()) {
+      $query->addField('r', 'admission_generation');
+    }
+    $row = $query->execute()->fetchObject();
     if (!$row) {
       return NULL;
     }
@@ -523,6 +605,13 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
       (int) $row->outbound_reposition_seconds,
       (string) $row->webform_id,
       (int) $row->expires_at,
+      // Carried on the unlocked planning copy too, so the prepared and locked holds
+      // are the same shape. This copy is advisory — the binding check reads the
+      // locked LockedHold above — but leaving it NULL here would misrepresent the row.
+      $row->price_snapshot_id === NULL ? NULL : (string) $row->price_snapshot_id,
+      // Task 24C-7A: present only when this read selected it; isset keeps an
+      // unselected or NULL column as NULL (unenrolled), never zero.
+      isset($row->admission_generation) ? (int) $row->admission_generation : NULL,
     );
   }
 
@@ -674,6 +763,7 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
             'price_snapshot_id' => $current->price_snapshot_id,
             'price_snapshot_cents' => $current->price_snapshot_cents,
             'price_snapshot_currency' => $current->price_snapshot_currency,
+            'price_snapshot_version' => $current->price_snapshot_version,
             // Carried forward for the same reason. The order that paid for this job
             // paid for the job, not for the hour it was first planned at.
             'order_id' => $current->order_id,
@@ -998,6 +1088,7 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
         'price_snapshot_id',
         'price_snapshot_cents',
         'price_snapshot_currency',
+        'price_snapshot_version',
         'created',
         'changed',
       ])
@@ -1034,6 +1125,7 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
       $row->price_snapshot_id === NULL ? NULL : (string) $row->price_snapshot_id,
       $row->price_snapshot_cents === NULL ? NULL : (int) $row->price_snapshot_cents,
       $row->price_snapshot_currency === NULL ? NULL : (string) $row->price_snapshot_currency,
+      $row->price_snapshot_version === NULL ? NULL : (string) $row->price_snapshot_version,
       (int) $row->created,
       (int) $row->changed,
     );
@@ -1625,6 +1717,52 @@ final class DatabaseReservationStore implements ReservationStoreInterface {
    */
   private function hash(string $value): string {
     return hash('sha256', $value);
+  }
+
+  /**
+   * Whether the dispatch-reservation table carries the admission_generation column.
+   *
+   * Probed once with fieldExists() and memoised on the instance. Fail-closed: any
+   * schema error is read as "absent", so an unmigrated or unreadable schema makes
+   * the store omit the column on write and skip it on read rather than guess. This
+   * is the only thing that lets a generation-free legacy call stay compatible with
+   * a schema that predates update_10049.
+   */
+  private function hasAdmissionGenerationColumn(): bool {
+    if ($this->hasAdmissionGenerationColumn === NULL) {
+      try {
+        $this->hasAdmissionGenerationColumn = $this->database->schema()
+          ->fieldExists(self::TABLE, 'admission_generation');
+      }
+      catch (\Exception) {
+        $this->hasAdmissionGenerationColumn = FALSE;
+      }
+    }
+
+    return $this->hasAdmissionGenerationColumn;
+  }
+
+  /**
+   * Rejects an admission generation that the column could not faithfully hold.
+   *
+   * NULL is always allowed: it is how an unenrolled row is expressed. A supplied
+   * value must be a positive integer within the unsigned-column range; zero and
+   * negatives are invalid rather than weaker synonyms for unenrolled, and a value
+   * above the ceiling would be truncated by the column. This validates the value
+   * only — it neither reads nor writes admission state and authorises nothing.
+   */
+  private function assertGenerationInRange(?int $generation): void {
+    if ($generation === NULL) {
+      return;
+    }
+    if ($generation < self::ADMISSION_GENERATION_MIN || $generation > self::ADMISSION_GENERATION_MAX) {
+      throw new \InvalidArgumentException(sprintf(
+        'Admission generation %d is out of range (%d-%d).',
+        $generation,
+        self::ADMISSION_GENERATION_MIN,
+        self::ADMISSION_GENERATION_MAX,
+      ));
+    }
   }
 
 }

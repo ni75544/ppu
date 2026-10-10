@@ -66,6 +66,13 @@ function custom_webform_handlers_schema(): array {
       'hold_token_hash' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => FALSE],
       'owner_hash' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => FALSE],
       'submission_id' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
+      // Booking admission enrollment (Task 24C). The admission generation this
+      // binding was minted at, or NULL when the row is not enrolled in booking
+      // admission. NULL is not generation zero and never permission to proceed; a
+      // later re-arm of the admission invalidates a binding minted earlier. Nullable,
+      // no backfill and no index: enrollment is decided by a locked, authoritative
+      // binding write, never inferred from this column being set.
+      'admission_generation' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
       'expires_at' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
       'created' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
       'changed' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
@@ -94,6 +101,13 @@ function custom_webform_handlers_schema(): array {
       'resource_id' => ['type' => 'varchar_ascii', 'length' => 128, 'not null' => TRUE],
       'webform_id' => ['type' => 'varchar_ascii', 'length' => 128, 'not null' => TRUE],
       'submission_id' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
+      // Booking admission enrollment (Task 24C). The admission generation this
+      // binding was minted at, or NULL when the row is not enrolled in booking
+      // admission. NULL is not generation zero and never permission to proceed; a
+      // later re-arm of the admission invalidates a binding minted earlier. Nullable,
+      // no backfill and no index: enrollment is decided by a locked, authoritative
+      // binding write, never inferred from this column being set.
+      'admission_generation' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
       'state' => ['type' => 'varchar_ascii', 'length' => 16, 'not null' => TRUE],
       // Pickup arrival: the Slot instant, in UTC.
       'pickup_arrival' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
@@ -115,6 +129,9 @@ function custom_webform_handlers_schema(): array {
       'price_snapshot_id' => ['type' => 'varchar_ascii', 'length' => 128, 'not null' => FALSE],
       'price_snapshot_cents' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
       'price_snapshot_currency' => ['type' => 'varchar_ascii', 'length' => 3, 'not null' => FALSE],
+      // Pricing-policy version the quote was computed under. Kept verbatim beside
+      // the amount so a later rate change cannot reinterpret a historical price.
+      'price_snapshot_version' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => FALSE],
       // The Commerce order this capacity was paid through, once one exists.
       //
       // Nullable and never unique. Nullable because a Hold has not been paid for
@@ -334,6 +351,13 @@ function custom_webform_handlers_schema(): array {
       // browser, which is what makes the link server-owned.
       'webform_id' => ['type' => 'varchar_ascii', 'length' => 128, 'not null' => TRUE],
       'submission_id' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
+      // Booking admission enrollment (Task 24C). The admission generation this
+      // binding was minted at, or NULL when the row is not enrolled in booking
+      // admission. NULL is not generation zero and never permission to proceed; a
+      // later re-arm of the admission invalidates a binding minted earlier. Nullable,
+      // no backfill and no index: enrollment is decided by a locked, authoritative
+      // binding write, never inferred from this column being set.
+      'admission_generation' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
       // The selected Slot, stored as the three facts a Slot is built from, so the
       // local pickup reading the visitor saw can be reproduced exactly even if the
       // Resource Profile's zone is changed afterwards.
@@ -351,6 +375,44 @@ function custom_webform_handlers_schema(): array {
       'quote_route_source' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => FALSE],
       'quote_route_fingerprint' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => FALSE],
       'quote_route_calculated_at' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
+      // The complete priced job the attempt was started against (Task 24B / E08),
+      // so the lifecycle can show what was bought and re-derive the accepted job's
+      // identity at confirmation without buying the route again. The raw job-leg
+      // distance and duration the price was computed from; the canonical integer-cent
+      // line-item breakdown as JSON, whose amounts sum to quote_amount_cents; and the
+      // normalized endpoint-pair fingerprint an address edit must change. All nullable
+      // because a staff-approved or a pre-24B legacy attempt carries no route facts;
+      // read defensively.
+      'quote_route_meters' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
+      'quote_route_seconds' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
+      'quote_line_items' => ['type' => 'text', 'size' => 'medium', 'not null' => FALSE],
+      'quote_pair_fingerprint' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => FALSE],
+      // The payload layout the digest below was computed under, and the digest
+      // itself — a schema-versioned SHA-256 over the whole stored payload. On read,
+      // a row whose figures no longer hash to this digest is refused rather than
+      // used to settle a booking against altered facts. NULL on a legacy row, which
+      // is read compatibly with its provenance flagged incomplete.
+      'quote_payload_schema_version' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
+      'quote_payload_digest' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => FALSE],
+      // The accepted job's identity (Task 24B / E09): a SHA-256 over the material
+      // job inputs — normalized ordered endpoints and every present pricing input —
+      // derived through the shared AcceptedJob canonicalization when the price was
+      // accepted. This is an inputs digest, not the payload digest above: two
+      // materially different jobs can price identically, so confirmation recomputes
+      // the same identity from the saved submission and refuses a job edited since
+      // acceptance, even one whose price and reserved duration are unchanged. NULL on
+      // a genuine legacy row that carries no identity; the comparison is skipped for
+      // it rather than read as a mismatch.
+      'quote_job_facts_digest' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => FALSE],
+      // The canonical accepted facts the digest above was computed over (Task 24B /
+      // E09) — the material job the customer accepted, as the deterministic JSON
+      // AcceptedJob::factsJson() produced. The digest names the job; this reconstructs
+      // it, and lets fromStored() re-derive the digest from these very facts and
+      // refuse a row whose identity and facts do not correspond. A digest alone cannot
+      // reconstruct what was accepted, which is why the facts are stored beside it.
+      // Medium text because a job's canonicalized answers can exceed a short column;
+      // NULL on a legacy row that carries neither field.
+      'quote_job_facts' => ['type' => 'text', 'size' => 'medium', 'not null' => FALSE],
       // pending, paid, failed, cancelled, or reconciliation_required.
       'state' => ['type' => 'varchar_ascii', 'length' => 32, 'not null' => TRUE],
       // Derived from the job, the Slot, and the price — never supplied by a caller.
@@ -507,6 +569,37 @@ function custom_webform_handlers_schema(): array {
       'routing_usage_period_end' => ['period_end'],
       'routing_usage_provider_period' => ['provider', 'purpose', 'period_start'],
     ],
+  ];
+
+  // Booking Admission (Task 24C): one per-submission job-exclusivity record —
+  // "is this saved submission already being booked, and by whom". Kept apart from
+  // the two driver-capacity families (…dispatch_reservation, …reservation), which
+  // have different writers and unique keys and so cannot gate each other; a single
+  // per-submission record can. Ordinary PRIMARY KEY on submission_id, with no
+  // secondary index and no generated column — a dedup/active-key column belongs on
+  // the capacity table whose writes it constrains, not on this job record. Column
+  // widths are reconciled to BookingAdmissionStore validation: state must hold the
+  // longest AdmissionState value ('reconciliation_required', 23 chars); the sha256
+  // owner-token hash is 64 chars; owner_kind is one of public|staff|manual; the
+  // intent fingerprint is stored and compared at full width (never truncated); note
+  // is bounded to 255 by the store. Timestamps follow the module's int-unsigned
+  // idiom. The store always writes generation explicitly, so it carries no default.
+  $schema['custom_webform_handlers_dispatch_booking_admission'] = [
+    'description' => 'Booking Admissions: one per-submission job-exclusivity record for a booking.',
+    'fields' => [
+      'submission_id' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
+      'generation' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
+      'state' => ['type' => 'varchar_ascii', 'length' => 32, 'not null' => TRUE],
+      'owner_token_hash' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => TRUE],
+      'intent_fingerprint' => ['type' => 'varchar_ascii', 'length' => 255, 'not null' => TRUE],
+      'owner_kind' => ['type' => 'varchar_ascii', 'length' => 16, 'not null' => TRUE],
+      'note' => ['type' => 'varchar', 'length' => 255, 'not null' => FALSE],
+      'created_at' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
+      'updated_at' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => TRUE],
+      'confirmed_at' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
+      'released_at' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
+    ],
+    'primary key' => ['submission_id'],
   ];
 
   return $schema;
@@ -4332,4 +4425,241 @@ function custom_webform_handlers_update_10044(): string {
   $schema->createTable($table, $definition);
 
   return (string) t('Created local routing usage counters for the permissioned provider dashboard.');
+}
+
+/**
+ * Sets the default customer routing mode on existing sites (Task 21A).
+ *
+ * development_fixed serves deterministic recorded routes with no outbound HTTP;
+ * live_cached is the cache-first Google path with its one-request controls. DDEV
+ * forces development_fixed in code regardless of this value, so an existing
+ * production site simply gains the explicit live_cached default it already
+ * behaves as. Set only when unset, so a settings.php override is never
+ * overwritten.
+ */
+function custom_webform_handlers_update_10045(): string {
+  $config = \Drupal::configFactory()->getEditable('custom_webform_handlers.settings');
+  if ($config->get('routing_mode') !== NULL) {
+    return (string) t('Customer routing mode already set; nothing changed.');
+  }
+
+  $config->set('routing_mode', 'live_cached')->save();
+
+  return (string) t('Set the default customer routing mode to live_cached.');
+}
+
+/**
+ * Adds the pricing-policy version to Dispatch Reservation price snapshots.
+ *
+ * The reservation already persists the price snapshot's identifier, amount, and
+ * currency; this records the pricing-policy version alongside them so a paid or
+ * replanned Reservation names the exact rate policy it was priced under. Nullable
+ * like its snapshot peers and added only when absent, so existing rows and any
+ * site that already has the column are left untouched.
+ */
+function custom_webform_handlers_update_10046(): string {
+  $schema = \Drupal::database()->schema();
+  $table = 'custom_webform_handlers_dispatch_reservation';
+  $field = 'price_snapshot_version';
+  if (!$schema->tableExists($table)) {
+    return (string) t('The Dispatch Reservation table is not present, so no pricing-policy version column was added.');
+  }
+  if ($schema->fieldExists($table, $field)) {
+    return (string) t('The Dispatch Reservation pricing-policy version column already exists; nothing changed.');
+  }
+
+  $definition = custom_webform_handlers_schema()[$table];
+  $schema->addField($table, $field, $definition['fields'][$field]);
+
+  return (string) t('Added the pricing-policy version to Dispatch Reservation price snapshots.');
+}
+
+/**
+ * Records the complete priced job on Checkout Attempts (Task 24B / E08, E09).
+ *
+ * The attempt already stored the total, currency, rate version, and bounded route
+ * provenance. This adds the rest of the priced job so the lifecycle records what
+ * was bought and can re-derive the accepted job's identity at confirmation without
+ * buying the route again: the raw job-leg distance and duration the price was
+ * computed from, the canonical integer-cent line-item breakdown as JSON, the
+ * normalized endpoint-pair fingerprint, a schema-versioned integrity digest with
+ * the layout version it was computed under (E08), the accepted job-facts digest —
+ * the SHA-256 over the material job inputs that confirmation recomputes and compares
+ * to refuse an intervening job edit — and the canonical accepted facts themselves,
+ * so the accepted job can be reconstructed and its digest re-derived from the very
+ * facts stored beside it rather than trusted as an unbacked value (E09).
+ *
+ * Every column is nullable and added only when absent, so existing rows keep NULL
+ * (read compatibly as a legacy figure with incomplete provenance) and a site that
+ * already has a column is left untouched. No existing attempt is rewritten: a row
+ * written before this payload existed is honoured as it stands, never regenerated.
+ */
+function custom_webform_handlers_update_10047(): string {
+  $schema = \Drupal::database()->schema();
+  $table = 'custom_webform_handlers_checkout_attempt';
+  if (!$schema->tableExists($table)) {
+    return (string) t('The Checkout Attempt table is not present, so no priced-job columns were added.');
+  }
+
+  $definition = custom_webform_handlers_schema()[$table];
+  $fields = [
+    'quote_route_meters',
+    'quote_route_seconds',
+    'quote_line_items',
+    'quote_pair_fingerprint',
+    'quote_payload_schema_version',
+    'quote_payload_digest',
+    'quote_job_facts_digest',
+    'quote_job_facts',
+  ];
+
+  $added = [];
+  foreach ($fields as $field) {
+    if ($schema->fieldExists($table, $field)) {
+      continue;
+    }
+    $schema->addField($table, $field, $definition['fields'][$field]);
+    $added[] = $field;
+  }
+
+  if ($added === []) {
+    return (string) t('The Checkout Attempt priced-job columns already exist; nothing changed.');
+  }
+
+  return (string) t('Added the complete priced job to Checkout Attempts: @fields.', [
+    '@fields' => implode(', ', $added),
+  ]);
+}
+
+/**
+ * Task 24C: create the Booking Admission table for per-submission job exclusivity.
+ *
+ * Adds custom_webform_handlers_dispatch_booking_admission (one row per submission,
+ * ordinary PRIMARY KEY on submission_id) from the canonical hook_schema()
+ * definition. Additive and idempotent: the table is created only when absent, an
+ * existing table is left untouched, and no other table's booking data is read or
+ * changed. There is no backfill, no generated column, and no secondary index. Until
+ * this hook runs the BookingAdmissionStore fails closed
+ * (AdmissionSchemaMissingException) on every entry point; once the table exists the
+ * store remains registered but inert, with no caller.
+ */
+function custom_webform_handlers_update_10048(): string {
+  $schema = \Drupal::database()->schema();
+  $table = 'custom_webform_handlers_dispatch_booking_admission';
+
+  if ($schema->tableExists($table)) {
+    return (string) t('The Booking Admission table already exists; nothing changed.');
+  }
+
+  $definition = custom_webform_handlers_schema()[$table];
+  $schema->createTable($table, $definition);
+
+  return (string) t('Created the Booking Admission table for per-submission job exclusivity.');
+}
+
+/**
+ * Task 24C (Batch 0): add the nullable admission_generation binding column.
+ *
+ * Adds a nullable admission_generation (INT UNSIGNED) to the three binding tables
+ * — custom_webform_handlers_checkout_attempt, _dispatch_reservation and the legacy
+ * _reservation — so a future binding write can record the admission generation it
+ * was minted against. NULL means not enrolled; it is never generation zero and never
+ * permission to proceed. There is no backfill, no new index and no binding-ledger
+ * table, and this hook wires no caller: booking admission stays inactive after it runs.
+ *
+ * The field definition is frozen inline rather than read from
+ * custom_webform_handlers_schema(), so a later edit to the fresh-install schema cannot
+ * change what this historical update applies. It is additive and safe to re-run: a
+ * table that already carries a compatible column is left untouched. Unlike the additive
+ * hooks before it, it fails clearly (UpdateException) rather than returning benignly
+ * when a prerequisite binding table is missing or when an existing admission_generation
+ * column is incompatible (not a nullable INT UNSIGNED) — either is a broken precondition
+ * a caller integration must not build on. Execution is not authorized by Batch 0.
+ */
+function custom_webform_handlers_update_10049(): string {
+  $connection = \Drupal::database();
+  $schema = $connection->schema();
+  $field = 'admission_generation';
+
+  // Frozen definition: identical to the fresh-install admission_generation on each
+  // binding table, and deliberately not read from custom_webform_handlers_schema().
+  $definition = [
+    'type' => 'int',
+    'unsigned' => TRUE,
+    'not null' => FALSE,
+  ];
+
+  // Prerequisite binding tables. This hook adds a column to them and never creates
+  // them, so a missing table is a broken precondition rather than a no-op.
+  $tables = [
+    'custom_webform_handlers_checkout_attempt',
+    'custom_webform_handlers_dispatch_reservation',
+    'custom_webform_handlers_reservation',
+  ];
+
+  // Fail clearly, before any mutation, if a prerequisite table is absent.
+  $missing = [];
+  foreach ($tables as $table) {
+    if (!$schema->tableExists($table)) {
+      $missing[] = $table;
+    }
+  }
+  if ($missing !== []) {
+    throw new \Drupal\Core\Utility\UpdateException(sprintf(
+      'Cannot add the %s binding column: prerequisite table(s) missing: %s. No column was added; resolve the schema and re-run.',
+      $field,
+      implode(', ', $missing)
+    ));
+  }
+
+  $added = [];
+  $kept = [];
+  foreach ($tables as $table) {
+    // Safe partial rerun: an already-present column is accepted only when it matches
+    // the frozen definition. An incompatible column is a different decision than this
+    // update makes and must fail clearly rather than be silently tolerated. MariaDB
+    // column introspection (Schema::fieldExists reports existence, never the type).
+    if ($schema->fieldExists($table, $field)) {
+      $existing = $connection->query("SHOW COLUMNS FROM {" . $table . "} LIKE '" . $field . "'")->fetchAssoc();
+      $type = isset($existing['Type']) ? strtolower((string) $existing['Type']) : '';
+      $base = preg_match('/^([a-z]+)/', $type, $m) === 1 ? $m[1] : '';
+      $nullable = isset($existing['Null']) && strtoupper((string) $existing['Null']) === 'YES';
+      // A compatible column must also default to NULL and carry no auto_increment or
+      // generated behaviour. A non-NULL default would silently enrol every existing row
+      // (NULL means not enrolled), and an auto_increment/generated column is something
+      // other than the plain nullable store a binding write records its generation into.
+      $default_is_null = !array_key_exists('Default', $existing) || $existing['Default'] === NULL;
+      $extra = isset($existing['Extra']) ? strtolower((string) $existing['Extra']) : '';
+      $generated = strpos($extra, 'auto_increment') !== FALSE || strpos($extra, 'generated') !== FALSE;
+      $compatible = $base === 'int' && strpos($type, 'unsigned') !== FALSE && $nullable && $default_is_null && !$generated;
+      if (!$compatible) {
+        throw new \Drupal\Core\Utility\UpdateException(sprintf(
+          'The %s.%s column already exists but is incompatible (found "%s", %s, %s%s; expected a nullable INT UNSIGNED defaulting to NULL with no auto_increment or generated column behaviour). Left unchanged; resolve it manually and re-run.',
+          $table,
+          $field,
+          $existing['Type'] ?? 'unknown type',
+          $nullable ? 'nullable' : 'NOT NULL',
+          $default_is_null ? 'default NULL' : 'default ' . (string) ($existing['Default'] ?? ''),
+          $extra !== '' ? ', extra "' . $extra . '"' : ''
+        ));
+      }
+      $kept[] = $table;
+      continue;
+    }
+    $schema->addField($table, $field, $definition);
+    $added[] = $table;
+  }
+
+  $summary = [];
+  if ($added !== []) {
+    $summary[] = (string) t('added to @t', ['@t' => implode(', ', $added)]);
+  }
+  if ($kept !== []) {
+    $summary[] = (string) t('already present and compatible on @t', ['@t' => implode(', ', $kept)]);
+  }
+
+  return (string) t('Booking admission binding column @field: @summary.', [
+    '@field' => $field,
+    '@summary' => implode('; ', $summary),
+  ]);
 }

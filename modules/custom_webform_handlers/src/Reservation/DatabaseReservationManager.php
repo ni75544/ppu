@@ -5,6 +5,7 @@ namespace Drupal\custom_webform_handlers\Reservation;
 use Drupal\Component\Datetime\TimeInterface;
 use Drupal\Core\Database\Connection;
 use Drupal\Core\Database\IntegrityConstraintViolationException;
+use Drupal\custom_webform_handlers\Dispatch\Admission\BookingAdmissionStoreInterface;
 use Psr\Log\LoggerInterface;
 
 /**
@@ -88,11 +89,43 @@ final class DatabaseReservationManager implements ReservationManagerInterface {
    */
   const ADMIN_LIMIT = 100;
 
+  /**
+   * Lowest admission generation this store will persist (Task 24C-7A).
+   *
+   * Enrolment begins at one; zero is reserved to mean "no generation", which the
+   * NULL column already expresses, so a supplied zero is an invalid value rather
+   * than a weaker synonym for unenrolled.
+   */
+  const ADMISSION_GENERATION_MIN = 1;
+
+  /**
+   * Highest admission generation the physical column can hold (Task 24C-7A).
+   *
+   * The column is int(10) unsigned, so this is its ceiling. Validating against it
+   * turns a silent out-of-range truncation into a clear refusal.
+   */
+  const ADMISSION_GENERATION_MAX = 4294967295;
+
   public function __construct(
     private readonly Connection $database,
     private readonly TimeInterface $time,
     private readonly LoggerInterface $logger,
+    // Booking admission store (Task 24C, Batch 1). Held, not called: this batch is
+    // inert wiring, so the constructor only assigns it and no method here reads an
+    // admission table. The first call is added later behind booking_admission.enforce,
+    // which ships false, so an unmigrated site is unaffected by this injection.
+    private readonly BookingAdmissionStoreInterface $bookingAdmissionStore,
   ) {}
+
+  /**
+   * Whether the admission_generation column exists, memoised per instance.
+   *
+   * NULL until first probed, kept on the instance and never in a cache bin that
+   * could outlive this connection's schema. Fail-closed, so an unmigrated or
+   * unreadable schema reads as "absent" and a generation-free legacy hold() stays
+   * compatible with a schema that predates update_10049.
+   */
+  private ?bool $hasAdmissionGenerationColumn = NULL;
 
   /**
    * {@inheritdoc}
@@ -252,10 +285,29 @@ final class DatabaseReservationManager implements ReservationManagerInterface {
   /**
    * {@inheritdoc}
    */
-  public function hold(ReservationSlot $slot, string $ownerId): HeldReservation {
+  public function hold(ReservationSlot $slot, string $ownerId, ?int $admissionGeneration = NULL): HeldReservation {
     $now = $this->now();
     $token = bin2hex(random_bytes(32));
     $expires = $now + max(1, $slot->holdSeconds);
+
+    // Task 24C-7A: validate any explicitly supplied admission generation before any
+    // transaction opens. The interface (ReservationManagerInterface::hold) does not
+    // declare this parameter; it is an optional implementation-only trailing
+    // argument, which LSP permits, so no interface caller is affected and no business
+    // caller supplies one. A non-NULL value therefore came from a caller that
+    // deliberately passed it: an out-of-range value is a programming error and
+    // throws, and an explicit generation on a schema that predates the column fails
+    // clearly here rather than being silently dropped by the insert. Passive
+    // transport only — nothing here consults or sets booking admission.
+    $this->assertGenerationInRange($admissionGeneration);
+    $present = $this->hasAdmissionGenerationColumn();
+    if ($admissionGeneration !== NULL && !$present) {
+      throw new \RuntimeException(sprintf(
+        'Admission generation %d was supplied but the %s table has no admission_generation column; refusing to persist.',
+        $admissionGeneration,
+        self::TABLE,
+      ));
+    }
 
     $transaction = $this->database->startTransaction();
     try {
@@ -263,22 +315,30 @@ final class DatabaseReservationManager implements ReservationManagerInterface {
       // the insert competes for its key.
       $this->expire($now);
 
+      $fields = [
+        'webform_id' => $slot->webformId,
+        'resource_id' => $slot->resourceId,
+        'slot_start' => $slot->startTimestamp,
+        'slot_end' => $slot->endTimestamp,
+        'timezone' => $slot->timezone,
+        'state' => self::STATE_HELD,
+        'active_slot_key' => $slot->activeSlotKey(),
+        'hold_token_hash' => $this->hash($token),
+        'owner_hash' => $this->hash($ownerId),
+        'submission_id' => NULL,
+        'expires_at' => $expires,
+        'created' => $now,
+        'changed' => $now,
+      ];
+      // Task 24C-7A: a new Hold enrols in no admission generation, so the column is
+      // written only when a generation was explicitly supplied — which no business
+      // caller does — and only when the migrated column exists. Omitting it defaults
+      // the column to NULL (unenrolled).
+      if ($present && $admissionGeneration !== NULL) {
+        $fields['admission_generation'] = $admissionGeneration;
+      }
       $this->database->insert(self::TABLE)
-        ->fields([
-          'webform_id' => $slot->webformId,
-          'resource_id' => $slot->resourceId,
-          'slot_start' => $slot->startTimestamp,
-          'slot_end' => $slot->endTimestamp,
-          'timezone' => $slot->timezone,
-          'state' => self::STATE_HELD,
-          'active_slot_key' => $slot->activeSlotKey(),
-          'hold_token_hash' => $this->hash($token),
-          'owner_hash' => $this->hash($ownerId),
-          'submission_id' => NULL,
-          'expires_at' => $expires,
-          'created' => $now,
-          'changed' => $now,
-        ])
+        ->fields($fields)
         ->execute();
     }
     catch (IntegrityConstraintViolationException $exception) {
@@ -435,6 +495,12 @@ final class DatabaseReservationManager implements ReservationManagerInterface {
   public function adminList(array $filters, int $limit = self::ADMIN_LIMIT, int $offset = 0): array {
     $query = $this->database->select(self::TABLE, 'r')
       ->fields('r', self::RECORD_FIELDS);
+    // Task 24C-7A: carry the admission generation into each admin record when the
+    // migrated column exists; fromRow() keeps an absent or NULL column as NULL
+    // (unenrolled). RECORD_FIELDS itself is unchanged, so no secret is widened.
+    if ($this->hasAdmissionGenerationColumn()) {
+      $query->addField('r', 'admission_generation');
+    }
 
     $date = $this->applyAdminFilters($query, $filters);
     if ($date === NULL) {
@@ -558,12 +624,16 @@ final class DatabaseReservationManager implements ReservationManagerInterface {
    * {@inheritdoc}
    */
   public function adminRecord(int $reservationId): ?ReservationRecord {
-    $row = $this->database->select(self::TABLE, 'r')
+    $query = $this->database->select(self::TABLE, 'r')
       ->fields('r', self::RECORD_FIELDS)
       ->condition('r.reservation_id', $reservationId)
-      ->range(0, 1)
-      ->execute()
-      ->fetchObject();
+      ->range(0, 1);
+    // Task 24C-7A: carry the admission generation when the migrated column exists;
+    // fromRow() keeps an absent or NULL column as NULL (unenrolled).
+    if ($this->hasAdmissionGenerationColumn()) {
+      $query->addField('r', 'admission_generation');
+    }
+    $row = $query->execute()->fetchObject();
 
     return $row ? ReservationRecord::fromRow($row) : NULL;
   }
@@ -778,6 +848,52 @@ final class DatabaseReservationManager implements ReservationManagerInterface {
 
   private function now(): int {
     return (int) $this->time->getRequestTime();
+  }
+
+  /**
+   * Whether the reservation table carries the admission_generation column.
+   *
+   * Probed once with fieldExists() and memoised on the instance. Fail-closed: any
+   * schema error is read as "absent", so an unmigrated or unreadable schema makes
+   * this store omit the column on write and skip it on read rather than guess. This
+   * is the only thing that lets a generation-free hold() call stay compatible with
+   * a schema that predates update_10049.
+   */
+  private function hasAdmissionGenerationColumn(): bool {
+    if ($this->hasAdmissionGenerationColumn === NULL) {
+      try {
+        $this->hasAdmissionGenerationColumn = $this->database->schema()
+          ->fieldExists(self::TABLE, 'admission_generation');
+      }
+      catch (\Exception) {
+        $this->hasAdmissionGenerationColumn = FALSE;
+      }
+    }
+
+    return $this->hasAdmissionGenerationColumn;
+  }
+
+  /**
+   * Rejects an admission generation that the column could not faithfully hold.
+   *
+   * NULL is always allowed: it is how an unenrolled row is expressed. A supplied
+   * value must be a positive integer within the unsigned-column range; zero and
+   * negatives are invalid rather than weaker synonyms for unenrolled, and a value
+   * above the ceiling would be truncated by the column. Validates the value only —
+   * it neither reads nor writes admission state and authorises nothing.
+   */
+  private function assertGenerationInRange(?int $generation): void {
+    if ($generation === NULL) {
+      return;
+    }
+    if ($generation < self::ADMISSION_GENERATION_MIN || $generation > self::ADMISSION_GENERATION_MAX) {
+      throw new \InvalidArgumentException(sprintf(
+        'Admission generation %d is out of range (%d-%d).',
+        $generation,
+        self::ADMISSION_GENERATION_MIN,
+        self::ADMISSION_GENERATION_MAX,
+      ));
+    }
   }
 
 }

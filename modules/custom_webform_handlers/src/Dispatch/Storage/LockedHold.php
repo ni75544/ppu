@@ -48,6 +48,20 @@ final readonly class LockedHold {
    *   The Webform the claim was made from.
    * @param int $expiresAt
    *   The expiry the locked read proved was still in the future.
+   * @param string|null $priceSnapshotId
+   *   The price-snapshot identity persisted with this claim when it was created
+   *   (Task 24B / E09), read under the same lock as everything else here. It is the
+   *   reservation's own record of which accepted quote it was held for, so the
+   *   confirm path can prove the accepted snapshot it is about to settle is the one
+   *   bound to THIS reservation rather than a value merely passed alongside the
+   *   token. NULL for an offer or staff Hold, which carries no accepted price, and
+   *   for a genuine pre-24A checkout claim written before the column existed.
+   * @param int|null $admissionGeneration
+   *   The booking-admission generation persisted with this reservation (Task
+   *   24C-7A), read under the same lock as everything else here. NULL for a row
+   *   that was never enrolled, and for a row written before the
+   *   admission_generation column existed. Passive transport only; it authorizes
+   *   nothing.
    */
   public function __construct(
     public int $reservationId,
@@ -58,6 +72,8 @@ final readonly class LockedHold {
     public int $outboundRepositionSeconds,
     public string $webformId,
     public int $expiresAt,
+    public ?string $priceSnapshotId = NULL,
+    public ?int $admissionGeneration = NULL,
   ) {}
 
 }

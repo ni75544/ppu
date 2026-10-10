@@ -123,6 +123,11 @@
           'The estimate is taking longer than expected. Change a field to retry, or submit the form and we will confirm the price.',
         );
 
+      case 'refresh_required':
+        return Drupal.t(
+          'That estimate has expired. Re-enter or re-confirm the addresses to refresh it — you can still submit the form and we will confirm the price.',
+        );
+
       case 'network_unavailable':
         return Drupal.t(
           'The estimate could not be updated while offline. You can still submit the form.',
@@ -466,6 +471,57 @@
     // that writing dispatches are never mistaken for visitor edits.
     let writingMappedFields = false;
 
+    // Per-pair route_preview operation ids. A route_preview is idempotent by this
+    // id on the server: presenting the same id for the same journey replays the
+    // recorded — already billed — result instead of calculating again, which
+    // closes the lost-response and concurrent-duplicate gaps the in-flight marker
+    // alone cannot. One id per committed pair, minted lazily and reused for every
+    // route_preview of that pair, and dropped only when the server reports its
+    // fact is gone (refresh_required) so the next commit mints a fresh one. It is
+    // in-memory: a reload is a fresh intent, and the server's own dedup window and
+    // route cache cover a re-request after one.
+    const routeOperationIds = new Map();
+
+    /**
+     * Returns the stable operation id for a committed pair, minting one lazily.
+     */
+    function operationIdForPair(pair) {
+      let id = routeOperationIds.get(pair);
+      if (!id) {
+        id = mintOperationId();
+        routeOperationIds.set(pair, id);
+      }
+      return id;
+    }
+
+    /**
+     * Mints an opaque operation id within the server's accepted charset/length.
+     *
+     * A UUID from the platform crypto source when there is one; a random hex
+     * string when only getRandomValues is present; and, absent both, a time+random
+     * token that is still unique within one browser — which is all that is needed,
+     * because the id is scoped to this owner and this journey on the server side.
+     */
+    function mintOperationId() {
+      const source = window.crypto || window.msCrypto;
+      if (source && typeof source.randomUUID === 'function') {
+        return source.randomUUID();
+      }
+      if (source && typeof source.getRandomValues === 'function') {
+        const bytes = new Uint8Array(16);
+        source.getRandomValues(bytes);
+        return Array.from(bytes, (byte) =>
+          byte.toString(16).padStart(2, '0'),
+        ).join('');
+      }
+      return (
+        'op-' +
+        Date.now().toString(36) +
+        '-' +
+        Math.random().toString(36).slice(2, 12)
+      );
+    }
+
     function routeEntry(pair) {
       return routeLedger.find((entry) => entry.pair === pair) || null;
     }
@@ -485,6 +541,24 @@
       }
       writeRouteLedger(routeLedgerKey, routeLedger);
       return entry;
+    }
+
+    /**
+     * Removes a pair's ledger entry so a re-commit may attempt it afresh.
+     *
+     * Used only when the server has told us the fact it once held is gone
+     * (refresh_required). The one-attempt-per-pair rule exists to stop a browser
+     * re-buying the same route, not to strand a visitor whose fact merely
+     * expired: forgetting the entry lets one explicit re-commit ask for a new
+     * route_preview, while the dirty-gate still bars any incidental event from
+     * doing so on its own.
+     */
+    function forgetRouteAttempt(pair) {
+      const index = routeLedger.findIndex((entry) => entry.pair === pair);
+      if (index !== -1) {
+        routeLedger.splice(index, 1);
+        writeRouteLedger(routeLedgerKey, routeLedger);
+      }
     }
 
     function persistInput() {
@@ -588,6 +662,7 @@
         'quote_status',
         'quote_rate_version',
         'quote_breakdown',
+        'accepted_quote',
       ].forEach((key) => setMappedField(key, ''));
     }
 
@@ -673,7 +748,50 @@
       setMappedField('quote_currency', data.quote.currency || '');
       setMappedField('quote_status', data.quote.status || '');
       setMappedField('quote_rate_version', data.quote.rate_version || '');
-      setMappedField('quote_breakdown', JSON.stringify(data.quote));
+      // The opaque reference to the server-owned route fact travels inside the
+      // breakdown so it survives to submission, save and checkout without a new
+      // form element. It is the browser's only handle on the exact fact this
+      // estimate was priced from; the server re-prices from that same fact by this
+      // reference (never by re-selecting any fact whose pair merely matches), which
+      // is what guarantees the price accepted, saved and charged is one figure. By
+      // now data.route_reference is always a string — minted for a route_preview,
+      // carried forward from the last success for a quote-only reprice.
+      setMappedField(
+        'quote_breakdown',
+        JSON.stringify(
+          Object.assign({}, data.quote, {
+            route_reference:
+              typeof data.route_reference === 'string' ? data.route_reference : '',
+          }),
+        ),
+      );
+      // The dedicated per-instance reference carrier. Unlike the breakdown (which
+      // this form renders only on its last wizard page), this hidden element is
+      // present on page one where the commit happens, so the exact reference reaches
+      // the acceptance gate on a later page. The server re-prices strictly from this
+      // reference and re-validates the pair, so a stale value for a since-changed
+      // address is refused, never silently reused.
+      setMappedField(
+        'route_reference',
+        typeof data.route_reference === 'string' ? data.route_reference : '',
+      );
+      // The dedicated per-instance accepted-quote carrier. Like the reference
+      // carrier above, this hidden element is present on every wizard page —
+      // including page one, where the estimate is produced — so the server-produced
+      // figure the customer saw reaches the acceptance gate, which runs on the
+      // page-two advance before the breakdown field is ever rendered. It carries the
+      // same quote the breakdown does; the gate compares total, currency and rate
+      // version against a fresh server re-price and only equality lets the save
+      // continue, so this is evidence of the seen figure, never price authority.
+      setMappedField(
+        'accepted_quote',
+        JSON.stringify(
+          Object.assign({}, data.quote, {
+            route_reference:
+              typeof data.route_reference === 'string' ? data.route_reference : '',
+          }),
+        ),
+      );
 
       emit('custom-webform-quote-updated', { quote: data.quote });
       emit('custom-webform-route-validated', {
@@ -792,22 +910,24 @@
       });
 
       try {
+        // The operation is stated explicitly, never inferred by the server from
+        // which fields are present. A new pair asks for a route_preview; a known
+        // pair asks for a quote_only reprice and names the server-held fact by
+        // the opaque reference the preview handed back — it sends no distance of
+        // its own, because the browser is not the authority for one.
         const payload = {
+          operation: routeRequest ? 'route_preview' : 'quote_only',
           origin: route.origin,
           destination: route.destination,
           quote_input: quoteInput,
         };
-        if (!routeRequest) {
-          payload.cached_distance = {
-            distance_meters:
-              lastSuccessfulData.distance.distance_meters,
-            duration_seconds:
-              lastSuccessfulData.distance.duration_seconds,
-            provider: lastSuccessfulData.distance.provider,
-            calculated_at:
-              lastSuccessfulData.distance.calculated_at,
-          };
-          payload.route_fingerprint = lastSuccessfulData.fingerprint || '';
+        if (routeRequest) {
+          // A route_preview must be nameable so the server can make it
+          // idempotent; the id is stable for this pair, so a retry of the same
+          // journey replays rather than re-bills.
+          payload.operation_id = operationIdForPair(pair);
+        } else {
+          payload.route_reference = lastSuccessfulData.route_reference || '';
         }
         const response = await postPreview(payload, abort.controller.signal);
 
@@ -834,10 +954,18 @@
         }
 
         if (!routeRequest) {
-          // Quote-only responses deliberately omit route geometry. Preserve the
-          // one Google result already held by this session.
+          // Quote-only responses deliberately omit route geometry and do not
+          // re-issue a reference. Preserve the one route result and the one
+          // reference already held by this session.
           data.distance = lastSuccessfulData.distance;
           data.fingerprint = lastSuccessfulData.fingerprint || '';
+          data.route_reference = lastSuccessfulData.route_reference || '';
+        } else {
+          // The reference names the fact the server just took into custody. It
+          // is the browser's only handle on that fact; a quote-only reprice can
+          // present nothing else and be believed.
+          data.route_reference =
+            typeof data.route_reference === 'string' ? data.route_reference : '';
         }
 
         applyPreview(data, route);
@@ -863,6 +991,26 @@
         }
         if (routeRequest) {
           recordRouteAttempt(pair, 'failed', null);
+        } else if (code === 'refresh_required') {
+          // The server no longer holds a usable fact for this pair — its custody
+          // expired, or the routing mode changed under it. Repricing again would
+          // present the same dead reference and be refused again forever, so the
+          // known-route state is torn down and the ledger entry demoted. A fresh
+          // estimate now requires re-committing the pair through the address
+          // event, which is the only thing allowed to ask for a route_preview:
+          // the failure cannot convert itself into a route request, and a
+          // pricing edit, focus, date, poll or wizard rebuild cannot either.
+          lastRequestKey = '';
+          lastSuccessfulKey = '';
+          lastSuccessfulData = null;
+          lastSuccessfulPair = '';
+          forgetRouteAttempt(pair);
+          // The fact this journey's operation id vouched for is gone, so the id is
+          // spent. Drop it: the re-commit the visitor must now make mints a fresh
+          // one and buys a genuinely new route, rather than replaying a dead id.
+          routeOperationIds.delete(pair);
+          markAddressesDirty(messageFor(code));
+          return;
         } else {
           // A quote-only failure did not spend a route request and may be
           // retried after the visitor changes another pricing answer.

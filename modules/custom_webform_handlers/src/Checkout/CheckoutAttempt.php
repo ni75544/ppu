@@ -61,6 +61,15 @@ final readonly class CheckoutAttempt {
    *   When the attempt last moved.
    * @param int|null $settled
    *   When it stopped being pending, or NULL while it still is.
+   * @param int|null $admissionGeneration
+   *   Booking-admission generation for this attempt (Task 24C booking-admission).
+   *   Passive carriage: the store persists it and reads it back, and nothing on
+   *   this object derives a decision from it. opening() now accepts one as an
+   *   optional trailing argument, but no caller supplies a generation in the
+   *   current task, so every attempt opened today still carries NULL. The
+   *   admissible range is enforced where the row is written (CheckoutAttemptStore),
+   *   not here, because a value object cannot know which schema it is about to be
+   *   stored under.
    */
   private function __construct(
     public ?int $attemptId,
@@ -74,6 +83,7 @@ final readonly class CheckoutAttempt {
     public int $created = 0,
     public int $changed = 0,
     public ?int $settled = NULL,
+    public ?int $admissionGeneration = NULL,
   ) {}
 
   /**
@@ -82,8 +92,24 @@ final readonly class CheckoutAttempt {
    * The idempotency key is derived here rather than accepted, so no caller can
    * choose one — a caller that could choose it could defeat the unique index by
    * varying it, which is the one thing the key exists to prevent.
+   *
+   * The optional admission generation is passive carriage, forwarded straight to
+   * the stored row through the constructor, which carries it without validating or
+   * deriving anything from it; its admissible range is enforced where the row is
+   * written (CheckoutAttemptStore), not here. It is deliberately absent
+   * from intentKey(): two requests that mean the same booking must still collide
+   * whatever generation either carries, so enrolling an intent in a later
+   * admission generation can never mint a second order. It defaults to NULL, and
+   * no caller supplies one in the current task, so this signature only makes the
+   * creation path *capable* of carrying a generation — it does not start carrying
+   * one. An out-of-range value is refused by CheckoutAttemptStore when the row is
+   * written, not here.
+   *
+   * @param int|null $admissionGeneration
+   *   The booking-admission generation to stamp onto the new attempt, or NULL to
+   *   open it unenrolled.
    */
-  public static function opening(int $orderId, int $submissionId, Slot $slot, QuoteSnapshot $quote, int $now): self {
+  public static function opening(int $orderId, int $submissionId, Slot $slot, QuoteSnapshot $quote, int $now, ?int $admissionGeneration = NULL): self {
     return new self(
       NULL,
       $orderId,
@@ -95,6 +121,7 @@ final readonly class CheckoutAttempt {
       NULL,
       $now,
       $now,
+      admissionGeneration: $admissionGeneration,
     );
   }
 
@@ -105,7 +132,7 @@ final readonly class CheckoutAttempt {
    * rebuilt through their own validating constructors, so a row that no longer
    * reads as a coherent attempt cannot be reconstructed into one.
    */
-  public static function stored(int $attemptId, int $orderId, int $submissionId, Slot $slot, QuoteSnapshot $quote, CheckoutState $state, string $idempotencyKey, ?int $dispatchReservationId, int $created, int $changed, ?int $settled): self {
+  public static function stored(int $attemptId, int $orderId, int $submissionId, Slot $slot, QuoteSnapshot $quote, CheckoutState $state, string $idempotencyKey, ?int $dispatchReservationId, int $created, int $changed, ?int $settled, ?int $admissionGeneration = NULL): self {
     return new self(
       $attemptId,
       $orderId,
@@ -118,6 +145,7 @@ final readonly class CheckoutAttempt {
       $created,
       $changed,
       $settled,
+      $admissionGeneration,
     );
   }
 
@@ -139,18 +167,45 @@ final readonly class CheckoutAttempt {
    *
    * Public so the store can look an intent up before an order exists, which is
    * what lets a double-clicked pay button be answered with the order it already
-   * opened instead of a second Hold on the same Slot. It takes the three facts and
+   * opened instead of a second Hold on the same Slot. It takes the facts and
    * derives the key; there is still no way for a caller to supply a key of its
    * own, which is the property the unique index depends on.
+   *
+   * The price alone does not name the job (Task 24B / E09). snapshotId is derived
+   * from six pricing-OUTPUT fields, so two materially different jobs — a different
+   * package, handling, service, or address that happens to price to the same total
+   * from the same cached route — share a snapshotId, and on the same submission and
+   * Slot would have shared this key too. That is the collision the reviewer flagged:
+   * a second, different job answered as a repeat of the first. So when the snapshot
+   * carries an accepted-job identity, that identity — which hashes the material
+   * INPUTS — is folded in, and the two jobs get distinct keys.
+   *
+   * The fold is conditional to preserve two kinds of already-issued key. A genuine
+   * legacy snapshot carries no identity (hasJobFactsIdentity() is false), so its key
+   * is derived exactly as before and an attempt opened under the old scheme still
+   * resolves to itself. And because the identity is APPENDED only when present, a
+   * current snapshot's key is a superset derivation, not a re-ordering of the old
+   * one: nothing that was distinct becomes equal. This does not make future
+   * revisions of a job share an old key — a revised job has a different identity and
+   * therefore a different key, which is the whole point.
    */
   public static function intentKey(int $submissionId, Slot $slot, QuoteSnapshot $quote): string {
-    return substr(hash('sha256', implode('|', [
+    $parts = [
       $submissionId,
       $slot->webformId,
       $slot->resourceId,
       $slot->startTimestamp,
       $quote->snapshotId,
-    ])), 0, 64);
+    ];
+    // Appended, never substituted, and only when the snapshot actually carries an
+    // identity: a legacy snapshot's key is left byte-identical to what it was opened
+    // under, while a current snapshot's key additionally distinguishes two different
+    // jobs that price alike.
+    if ($quote->hasJobFactsIdentity()) {
+      $parts[] = $quote->jobFactsDigest;
+    }
+
+    return substr(hash('sha256', implode('|', $parts)), 0, 64);
   }
 
 }

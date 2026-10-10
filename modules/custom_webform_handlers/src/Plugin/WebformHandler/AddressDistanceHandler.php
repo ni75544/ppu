@@ -10,6 +10,9 @@ use Drupal\Core\Url;
 use Drupal\custom_webform_handlers\Checkout\DispatchCheckoutStarter;
 use Drupal\custom_webform_handlers\Distance\DistanceProviderException;
 use Drupal\custom_webform_handlers\Distance\DistanceProviderInterface;
+use Drupal\custom_webform_handlers\Distance\RouteFactStore;
+use Drupal\custom_webform_handlers\Distance\RoutingModeResolver;
+use Drupal\custom_webform_handlers\Distance\RoutingPolicy;
 use Drupal\custom_webform_handlers\Dispatch\DispatchManualReviewEntry;
 use Drupal\custom_webform_handlers\Dispatch\Notify\DispatchNotification;
 use Drupal\custom_webform_handlers\Dispatch\Notify\DispatchNotifierInterface;
@@ -53,6 +56,33 @@ class AddressDistanceHandler extends WebformHandlerBase {
    * cannot leave the browser committing on the first event of a burst.
    */
   const PREVIEW_DEBOUNCE_MS = 600;
+
+  /**
+   * The dedicated hidden element carrying this form instance's route reference.
+   *
+   * Added on every wizard page by alterForm() at render time (no stored config, no
+   * migration), populated by the successful preview on page 1, and re-seeded on each
+   * later page from the value persisted for THIS submission — so the exact reference
+   * is present at the acceptance gate, which fires pages before the quote-breakdown
+   * element (page 3) is ever rendered. The reference is bound to this submission
+   * instance, never recovered by owner or address pair, so two forms for the same
+   * pair keep their own references and one form's later preview cannot change
+   * another's accepted fact.
+   */
+  const ROUTE_REFERENCE_KEY = 'custom_route_reference';
+
+  /**
+   * The dedicated per-instance carrier for the accepted quote figure.
+   *
+   * A sibling of ROUTE_REFERENCE_KEY, added on every wizard page for the same
+   * reason: the acceptance gate fires on the page-two advance, before the
+   * quote-breakdown element (page 3) is rendered, so the server-produced figure the
+   * customer saw has to ride a carrier that is present at the gate. It is NOT price
+   * authority — the gate re-prices from the server-owned route fact named by the
+   * reference and only lets a save continue when this figure equals that fresh
+   * result, so a forged carrier can never lower the price, only ask to re-accept.
+   */
+  const ACCEPTED_QUOTE_KEY = 'custom_accepted_quote';
 
   /**
    * Bounds for a configured commit debounce, milliseconds.
@@ -121,9 +151,26 @@ class AddressDistanceHandler extends WebformHandlerBase {
   ];
 
   /**
-   * The Google Routes provider used for customer quote calculations.
+   * The customer-route entry facade used for customer quote calculations.
+   *
+   * The routing-mode facade rather than the Google adapter directly: in DDEV it
+   * serves a deterministic recorded route and makes no outbound request.
    */
   protected DistanceProviderInterface $distanceProvider;
+
+  /**
+   * The server-owned route-fact custody the browser preview writes to.
+   *
+   * The submission acceptance gate re-prices from the fact this owner already
+   * holds for the committed pair rather than asking the provider for the route a
+   * second time, so accepting an unchanged estimate costs no route calculation.
+   */
+  protected RouteFactStore $routeFactStore;
+
+  /**
+   * Decides the routing mode, and gates browser Google Maps loading.
+   */
+  protected RoutingModeResolver $routingModeResolver;
 
   /**
    * The authoritative quote calculator.
@@ -249,7 +296,9 @@ class AddressDistanceHandler extends WebformHandlerBase {
    */
   public static function create(ContainerInterface $container, array $configuration, $plugin_id, $plugin_definition) {
     $instance = parent::create($container, $configuration, $plugin_id, $plugin_definition);
-    $instance->distanceProvider = $container->get('custom_webform_handlers.google_routes_distance_provider');
+    $instance->distanceProvider = $container->get('custom_webform_handlers.customer_route_entry_provider');
+    $instance->routeFactStore = $container->get('custom_webform_handlers.route_fact_store');
+    $instance->routingModeResolver = $container->get('custom_webform_handlers.routing_mode_resolver');
     $instance->quoteCalculator = $container->get('custom_webform_handlers.quote_calculator');
     $instance->reservationManager = $container->get('custom_webform_handlers.reservation_manager');
     $instance->reservationDefinitionProvider = $container->get('custom_webform_handlers.reservation_definition_provider');
@@ -753,6 +802,16 @@ class AddressDistanceHandler extends WebformHandlerBase {
     // is possible and another when it is not would be worse than either order alone.
     $this->orderServiceCards($form, $webform_submission, $cacheability);
 
+    // Express Courier is a single standard-priced service, so the retired rush and
+    // expedited tiers are removed from the live form here rather than being offered
+    // and then stripped at submission. This uses the same runtime form-alter path as
+    // the service-card ordering above — no stored-config edit and no update hook — so
+    // a new booking can only carry courier_urgency='standard', which is the level the
+    // price, the submission canonicalisation and the checkout requote all honour.
+    // Historical submissions, stored snapshots, and every other service's own
+    // urgency handling are untouched: this only prunes the options the form renders.
+    $this->restrictCourierUrgencyToStandard($form);
+
     $reservation = $this->reservationSettings($webform_id, $cacheability);
     if ($reservation !== []) {
       $form['#attached']['library'][] = 'custom_webform_handlers/reservation_slots';
@@ -777,7 +836,13 @@ class AddressDistanceHandler extends WebformHandlerBase {
       return;
     }
 
-    $maps_enabled = (bool) $settings_config->get('google_maps_browser_enabled');
+    // development_fixed makes no outbound request, so the browser must not load
+    // Google Maps or Places either. Even with the config flag on, dev forces the
+    // key empty here, so the route_map_preview library and key are never attached
+    // below and js/distance_calculator.js never injects the Maps script. The
+    // self-hosted autocomplete endpoint is independent of this and keeps working.
+    $maps_enabled = !$this->routingModeResolver->isDevelopmentFixed()
+      && (bool) $settings_config->get('google_maps_browser_enabled');
     $api_key = $maps_enabled
       ? trim((string) $settings_config->get('google_maps_browser_api_key'))
       : '';
@@ -827,6 +892,40 @@ class AddressDistanceHandler extends WebformHandlerBase {
       'quote_breakdown' => $this->configuration['quote_breakdown_field'],
       'quote_status' => $this->configuration['quote_status_field'],
       'quote_rate_version' => $this->configuration['quote_rate_version_field'],
+      // The dedicated per-instance route-reference carrier, added below on every
+      // wizard page. The browser writes the successful preview's reference here so
+      // it reaches the acceptance gate (which runs before the breakdown page).
+      'route_reference' => self::ROUTE_REFERENCE_KEY,
+      // The dedicated per-instance accepted-quote carrier, added below on every
+      // wizard page. The browser writes the successful preview's quote here so the
+      // figure the customer saw reaches the acceptance gate, which runs before the
+      // quote-breakdown page is ever rendered.
+      'accepted_quote' => self::ACCEPTED_QUOTE_KEY,
+    ];
+
+    // Add the dedicated route-reference carrier to THIS page's form, whatever page
+    // of the wizard it is, and re-seed it from the value persisted for this form
+    // instance so it survives rebuilds, submission and checkout. It is a runtime
+    // element (no stored config, no migration); the browser sets it on page 1 from
+    // the preview response, and validateForm() persists it forward.
+    $form[self::ROUTE_REFERENCE_KEY] = [
+      '#type' => 'hidden',
+      '#default_value' => $this->routeReferenceValue($form_state, $webform_submission),
+      '#attributes' => ['data-custom-route-reference' => '1'],
+    ];
+
+    // The dedicated accepted-quote carrier, added on the same terms as the route
+    // reference above and for the same reason: the acceptance gate runs on the
+    // page-two advance, before the quote-breakdown element is rendered, so the
+    // figure the customer saw has to ride a hidden element present on this page. The
+    // browser sets it on page 1 from the preview response, and validateForm()
+    // persists it forward. It is evidence of the seen figure only — the gate
+    // re-prices from the server fact and requires equality, so this is never trusted
+    // as price authority.
+    $form[self::ACCEPTED_QUOTE_KEY] = [
+      '#type' => 'hidden',
+      '#default_value' => $this->acceptedQuoteValue($form_state, $webform_submission),
+      '#attributes' => ['data-custom-accepted-quote' => '1'],
     ];
 
     // The Dispatch Planner is the other scheduling layer, and the two are
@@ -981,6 +1080,47 @@ class AddressDistanceHandler extends WebformHandlerBase {
    * written, and a form whose render cache did not know that would keep serving the
    * previous order until something unrelated invalidated it.
    */
+  /**
+   * Prunes the Courier urgency control to its only honoured level, 'standard'.
+   *
+   * Express Courier does not price or book a rush/expedited tier — the submission
+   * path already canonicalises courier_urgency to 'standard' and QuoteCalculator
+   * applies no urgency surcharge for courier. Offering the tiers on the form only
+   * let a customer pick a level the booking then silently dropped, which (because
+   * the browser preview priced the picked tier while the submission recomputed
+   * standard) drove the "estimate updated … submit again" acceptance loop. Removing
+   * the options at render time closes that at the source, on the same form-alter
+   * path the service-card ordering uses, without touching stored configuration.
+   *
+   * No-op when the element is absent or already has no rush/expedited option, so a
+   * form without a Courier urgency control, or one already reduced, is unaffected.
+   * Only the rendered #options are pruned; other services and stored data are left
+   * exactly as they were.
+   */
+  private function restrictCourierUrgencyToStandard(array &$form): void {
+    $element = &$this->findElement($form, 'courier_urgency');
+    if ($element === NULL || !is_array($element['#options'] ?? NULL)) {
+      return;
+    }
+
+    // Keep only 'standard' — the rush and expedited tiers are the ones being
+    // removed, so the current #default_value is never a reason to retain them.
+    $pruned = array_intersect_key($element['#options'], ['standard' => TRUE]);
+    if ($pruned === []) {
+      // 'standard' is not an option key here (an unexpected or renamed option
+      // set); leave the element untouched rather than render a control with no
+      // choices. The real Courier form uses the 'standard' key, so this fallback
+      // only guards a future rename and never silently empties the control.
+      unset($element);
+      return;
+    }
+
+    $element['#options'] = $pruned;
+    // A stale rush/expedited default would otherwise select a now-absent option.
+    $element['#default_value'] = 'standard';
+    unset($element);
+  }
+
   private function orderServiceCards(array &$form, ?WebformSubmissionInterface $webform_submission, CacheableMetadata $cacheability): void {
     // Whatever the answer turns out to be, this form's rendering now depends on the
     // snapshot and on the settings that decide whether the snapshot may be used.
@@ -1416,6 +1556,17 @@ class AddressDistanceHandler extends WebformHandlerBase {
   public function validateForm(array &$form, FormStateInterface $form_state, WebformSubmissionInterface $webform_submission) {
     parent::validateForm($form, $form_state, $webform_submission);
 
+    // Carry this instance's route reference forward on every page submit — into the
+    // cached form state (so the next wizard page re-renders it) and this submission's
+    // own data (so save and checkout read it) — before any early return below. The
+    // browser set the dedicated hidden element on page 1 from the preview; this is
+    // what makes the exact reference present at the acceptance gate on a later page.
+    $this->persistRouteReference($form_state, $webform_submission);
+    // Carry the accepted-quote figure forward on the same terms as the reference:
+    // the browser set it on page 1 from the preview, and it must survive to the
+    // acceptance gate on a later page and into this submission's own data.
+    $this->persistAcceptedQuote($form_state, $webform_submission);
+
     if ($webform_submission->isDraft()) {
       // A draft keeps only its Hold. It never becomes a Reservation, so there
       // is nothing to prove yet. True of both scheduling workflows.
@@ -1563,8 +1714,58 @@ class AddressDistanceHandler extends WebformHandlerBase {
 
     $quoteInput = $submission->getData();
 
+    // The accepted breakdown the browser posted carries the opaque reference to the
+    // exact server-owned route fact this estimate was priced from. Parse it first —
+    // the reference is what makes the re-price use that one fact and no other.
+    // Read the accepted figure from the dedicated per-instance carrier first: it is
+    // present at this gate (added on every wizard page) whereas the breakdown field
+    // is not rendered until a later page. Fall back to the breakdown field for a
+    // single-page form where the field is present at submit time.
+    $acceptedRaw = $this->acceptedQuoteValue($form_state, $submission);
+    if ($acceptedRaw === '') {
+      $acceptedRaw = (string) $this->submittedValue($form_state, $submission, $breakdownField);
+    }
+    $accepted = $this->decodeBreakdown($acceptedRaw);
+    // The exact reference to this form instance's route fact. It rides the dedicated
+    // hidden route-reference element (added on every wizard page by alterForm and
+    // populated from the successful preview), so it is present at THIS gate even
+    // though the breakdown field is not rendered until a later page. It is NEVER
+    // recovered by owner/address pair: two forms for the same pair keep their own
+    // references, and another form's later preview cannot change this one's.
+    $mode = $this->routingModeResolver->effectiveMode();
+    $reference = $this->routeReferenceValue($form_state, $submission);
+
+    // Re-price from that exact fact — retrieved by its immutable reference, NOT by
+    // re-selecting any fact whose pair happens to match. The store validates the
+    // reference against the ordered pair, routing mode, purpose, resolved policy
+    // version and expiry, and it is owner-scoped (the private tempstore partitions
+    // by the session or user that ran the preview). The browser's own distance and
+    // duration are never trusted; only the server fact is. Accepting an unchanged
+    // estimate therefore costs zero route calculations, and a second, newer fact for
+    // the same pair can never be substituted for the one the customer accepted.
+    $distance = $this->routeFactStore->retrieve(
+      $reference,
+      $origin,
+      $destination,
+      $mode,
+      RoutingPolicy::PURPOSE_ORDINARY,
+    );
+    if ($distance === NULL) {
+      // Missing, expired, or mismatched fact — including a breakdown that carries no
+      // reference. Do NOT silently calculate another route: a fresh route is bought
+      // only by an explicit address re-commit, which re-runs the preview and mints a
+      // new fact. Return the established refresh-required outcome, and clear any
+      // stale accepted figure so a blocked submission can never persist a price the
+      // server did not just validate against its own fact.
+      $this->clearComputedValues($submission);
+      $form_state->setErrorByName(
+        $breakdownField,
+        $this->t('Your saved route estimate is no longer available. Please re-enter the pickup and delivery addresses to refresh your estimate, then submit again.'),
+      );
+      return;
+    }
+
     try {
-      $distance = $this->distanceProvider->calculate($origin, $destination);
       $quote = $this->quoteCalculator->calculate($quoteInput, $distance);
     }
     catch (\Throwable $exception) {
@@ -1577,18 +1778,6 @@ class AddressDistanceHandler extends WebformHandlerBase {
       return;
     }
 
-    $acceptedRaw = $this->submittedValue($form_state, $submission, $breakdownField);
-    $accepted = NULL;
-    if (is_string($acceptedRaw) && $acceptedRaw !== '') {
-      try {
-        $decoded = json_decode($acceptedRaw, TRUE, 16, JSON_THROW_ON_ERROR);
-        $accepted = is_array($decoded) ? $decoded : NULL;
-      }
-      catch (\JsonException) {
-        $accepted = NULL;
-      }
-    }
-
     $matches = $accepted !== NULL
       && (int) ($accepted['total_cents'] ?? -1) === $quote->totalCents()
       && strtoupper(trim((string) ($accepted['currency'] ?? ''))) === $quote->currency()
@@ -1598,10 +1787,19 @@ class AddressDistanceHandler extends WebformHandlerBase {
     }
 
     $quoteData = $quote->toArray();
-    $encoded = json_encode($quoteData, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
+    // Re-write the breakdown carrying the SAME reference forward, so the corrected
+    // estimate the customer must re-accept still names the exact fact, and so save
+    // and checkout re-price from it rather than re-selecting one.
+    $encoded = $this->breakdownWithReference($quoteData, $reference);
     if (is_string($encoded)) {
       $form_state->setValue($breakdownField, $encoded);
       $this->setSubmissionValue($submission, $breakdownField, $encoded);
+      // Carry the corrected figure on the dedicated per-instance carrier too, so the
+      // re-accept submit presents it to this gate (the breakdown field is not on this
+      // page) and equality is reachable in one further submit rather than never.
+      $form_state->set(self::ACCEPTED_QUOTE_KEY, $encoded);
+      $form_state->setValue(self::ACCEPTED_QUOTE_KEY, $encoded);
+      $this->setSubmissionValue($submission, self::ACCEPTED_QUOTE_KEY, $encoded);
     }
     $this->setAcceptedQuoteFields($form_state, $submission, $quoteData, $distance->distanceMeters());
 
@@ -1612,6 +1810,155 @@ class AddressDistanceHandler extends WebformHandlerBase {
         '@amount' => $quote->totalDecimal(),
       ]),
     );
+  }
+
+  /**
+   * Decodes a stored quote breakdown into an array, or NULL when unusable.
+   */
+  private function decodeBreakdown(mixed $raw): ?array {
+    if (!is_string($raw) || $raw === '') {
+      return NULL;
+    }
+    try {
+      $decoded = json_decode($raw, TRUE, 16, JSON_THROW_ON_ERROR);
+    }
+    catch (\JsonException) {
+      return NULL;
+    }
+    return is_array($decoded) ? $decoded : NULL;
+  }
+
+  /**
+   * Sanitises a route reference: an opaque lowercase-hex token, or ''.
+   */
+  private function sanitizeRouteReference(mixed $value): string {
+    $value = is_string($value) ? trim($value) : '';
+
+    return ($value !== '' && strlen($value) <= 128 && preg_match('/^[0-9a-f]+$/', $value) === 1) ? $value : '';
+  }
+
+  /**
+   * The route reference for THIS form instance, from the dedicated carrier.
+   *
+   * Read from the current step's submitted value first, then the value persisted
+   * for this form build, then this submission's own stored data — every source is
+   * bound to this one form instance. It is never recovered by owner or address
+   * pair. '' means "no reference for this instance", which every reader treats as a
+   * refusal to price, not a licence to re-select a fact.
+   */
+  private function routeReferenceValue(FormStateInterface $form_state, ?WebformSubmissionInterface $submission): string {
+    $fromInput = $this->sanitizeRouteReference($form_state->getValue(self::ROUTE_REFERENCE_KEY));
+    if ($fromInput !== '') {
+      return $fromInput;
+    }
+    $fromBuild = $this->sanitizeRouteReference($form_state->get(self::ROUTE_REFERENCE_KEY));
+    if ($fromBuild !== '') {
+      return $fromBuild;
+    }
+
+    return $submission === NULL ? '' : $this->sanitizeRouteReference($submission->getElementData(self::ROUTE_REFERENCE_KEY));
+  }
+
+  /**
+   * Persists this instance's route reference across wizard steps and to storage.
+   *
+   * Called on every page submit: the browser set the dedicated hidden element on
+   * page 1, and this carries that exact value forward — into the cached form state
+   * (so a later wizard page re-renders it) and into this submission's own data (so
+   * save and checkout read it). Bound to this form instance; an empty submitted
+   * value never clears a reference already established for the instance.
+   */
+  private function persistRouteReference(FormStateInterface $form_state, WebformSubmissionInterface $submission): void {
+    $reference = $this->routeReferenceValue($form_state, $submission);
+    if ($reference === '') {
+      return;
+    }
+    $form_state->set(self::ROUTE_REFERENCE_KEY, $reference);
+    $form_state->setValue(self::ROUTE_REFERENCE_KEY, $reference);
+    $submission->setElementData(self::ROUTE_REFERENCE_KEY, $reference);
+  }
+
+  /**
+   * Reads the route reference this submission persisted (save / checkout paths).
+   */
+  private function routeReferenceFromSubmission(WebformSubmissionInterface $submission): string {
+    return $this->sanitizeRouteReference($submission->getElementData(self::ROUTE_REFERENCE_KEY));
+  }
+
+  /**
+   * The accepted quote figure for THIS form instance, from the dedicated carrier.
+   *
+   * Read from the current step's submitted value first, then the value persisted
+   * for this form build, then this submission's own stored data — every source is
+   * bound to this one form instance, exactly as the route reference is. '' means
+   * "no accepted figure for this instance", which the gate treats as "not yet
+   * accepted" and answers by re-offering the current figure, never as a licence to
+   * skip the price check.
+   */
+  private function acceptedQuoteValue(FormStateInterface $form_state, ?WebformSubmissionInterface $submission): string {
+    $fromInput = $this->sanitizeAcceptedQuote($form_state->getValue(self::ACCEPTED_QUOTE_KEY));
+    if ($fromInput !== '') {
+      return $fromInput;
+    }
+    $fromBuild = $this->sanitizeAcceptedQuote($form_state->get(self::ACCEPTED_QUOTE_KEY));
+    if ($fromBuild !== '') {
+      return $fromBuild;
+    }
+
+    return $submission === NULL ? '' : $this->sanitizeAcceptedQuote($submission->getElementData(self::ACCEPTED_QUOTE_KEY));
+  }
+
+  /**
+   * Persists this instance's accepted quote across wizard steps and to storage.
+   *
+   * Called on every page submit beside persistRouteReference(), on the same terms:
+   * the browser set the dedicated hidden element on page 1 from the preview, and
+   * this carries that exact value into the cached form state (so a later wizard page
+   * re-renders it) and into this submission's own data. An empty submitted value
+   * never clears a figure already established for the instance.
+   */
+  private function persistAcceptedQuote(FormStateInterface $form_state, WebformSubmissionInterface $submission): void {
+    $accepted = $this->acceptedQuoteValue($form_state, $submission);
+    if ($accepted === '') {
+      return;
+    }
+    $form_state->set(self::ACCEPTED_QUOTE_KEY, $accepted);
+    $form_state->setValue(self::ACCEPTED_QUOTE_KEY, $accepted);
+    $submission->setElementData(self::ACCEPTED_QUOTE_KEY, $accepted);
+  }
+
+  /**
+   * Sanitises an accepted-quote carrier value: bounded JSON, or ''.
+   *
+   * It must be a short JSON object that decodes to something the gate can compare.
+   * Anything else — non-string, oversized, or not decodable — is treated as absent,
+   * so a malformed carrier can never stand in for a genuine accepted figure. It is
+   * never trusted as price authority regardless: the gate re-prices from the server
+   * fact and only equality permits the save.
+   */
+  private function sanitizeAcceptedQuote(mixed $value): string {
+    if (!is_string($value)) {
+      return '';
+    }
+    $value = trim($value);
+    if ($value === '' || strlen($value) > 4096) {
+      return '';
+    }
+
+    return $this->decodeBreakdown($value) !== NULL ? $value : '';
+  }
+
+  /**
+   * Encodes a quote breakdown carrying its route-fact reference forward.
+   *
+   * The reference is preserved on every rewrite so the corrected estimate the
+   * customer re-accepts, the figure persisted at save, and the price checkout
+   * prepares all name the identical fact.
+   */
+  private function breakdownWithReference(array $quote, string $reference): string|false {
+    $quote['route_reference'] = $reference;
+
+    return json_encode($quote, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
   }
 
   /**
@@ -2316,6 +2663,10 @@ class AddressDistanceHandler extends WebformHandlerBase {
 
     $origin = $submission->getElementData($this->configuration['origin_address_field']);
     $destination = $submission->getElementData($this->configuration['destination_address_field']);
+    // This form instance's route-fact reference, persisted in the submission's own
+    // data by the dedicated carrier across the wizard. Bound to this instance, never
+    // recovered by owner or address pair. Read before clearComputedValues() runs.
+    $reference = $this->routeReferenceFromSubmission($submission);
     $this->clearComputedValues($submission);
 
     // Canonicalise the simplified Courier inputs before the quote is calculated,
@@ -2339,8 +2690,31 @@ class AddressDistanceHandler extends WebformHandlerBase {
       return;
     }
 
+    // Persist the authoritative price from the SAME server-owned route fact the
+    // acceptance gate validated — not a fresh provider calculation. The fact
+    // carries the duration a stored mileage cannot, so re-pricing needs no route
+    // call. It is retrieved by the SAME immutable reference the accepted estimate
+    // carried in its breakdown — not by re-selecting a fact whose pair matches — and
+    // re-validated (ordered pair, mode, purpose, policy version, expiry). A missing,
+    // expired, mismatched, or reference-less fact fails through the existing
+    // recoverable Manual Review path rather than falling back to the network or
+    // inventing a distance, so a route is bought only by an explicit address
+    // re-commit that re-runs the preview.
+    $mode = $this->routingModeResolver->effectiveMode();
+    $distance = $this->routeFactStore->retrieve(
+      $reference,
+      (string) $origin,
+      (string) $destination,
+      $mode,
+      RoutingPolicy::PURPOSE_ORDINARY,
+    );
+    if ($distance === NULL) {
+      $this->markManualReview($submission, 'route_fact_unavailable');
+      $this->loggerFactory->get('custom_webform_handlers')->warning('Authoritative quote could not be persisted: no valid server-owned route fact for this booking; a fresh estimate must be recommitted.');
+      return;
+    }
+
     try {
-      $distance = $this->distanceProvider->calculate((string) $origin, (string) $destination);
       $this->setSubmissionValue($submission, $this->configuration['distance_field'], number_format($distance->distanceMiles(), 2, '.', '') . ' mi');
       $this->setSubmissionValue($submission, $this->configuration['distance_meters_field'], $distance->distanceMeters());
 
@@ -2351,17 +2725,13 @@ class AddressDistanceHandler extends WebformHandlerBase {
       $this->setSubmissionValue($submission, $this->configuration['quote_currency_field'], $quote->currency());
       $this->setSubmissionValue($submission, $this->configuration['quote_status_field'], $quote->status());
       $this->setSubmissionValue($submission, $this->configuration['quote_rate_version_field'], $quote->rateVersion());
+      // Persist the breakdown carrying the same reference forward, so checkout
+      // preparation prices from the identical fact rather than re-selecting one.
       $this->setSubmissionValue(
         $submission,
         $this->configuration['quote_breakdown_field'],
-        json_encode($quote_data, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE)
+        $this->breakdownWithReference($quote_data, $reference)
       );
-    }
-    catch (DistanceProviderException $exception) {
-      $this->markManualReview($submission, $exception->getMessage());
-      $this->loggerFactory->get('custom_webform_handlers')->warning('Authoritative route calculation failed with code @code.', [
-        '@code' => $exception->getMessage(),
-      ]);
     }
     catch (\Throwable $exception) {
       $this->markManualReview($submission, 'quote_calculation_failed');

@@ -168,14 +168,37 @@ graph.json
 # it is kept on disk and out of Git. Removed from the index by TASK 14B; nothing
 # in composer.json, .ddev/, the module, or qa/ reads any of these paths.
 #
-# The four directory rules end in "/" on purpose: they match directories only, so
-# the repository-scoped, portable, credential-free .claudeignore, .graphifyignore
-# and .gitnexusignore keep their existing tracked status, as do CLAUDE.md and
-# CONTEXT.md — the latter is cited by 20 committed files and must stay versioned.
-# Do not widen these to /.claude*, /.agents*, /modules/**, or /*.json.
+# These rules match the named directories/contents only, so the repository-scoped,
+# portable, credential-free .claudeignore, .graphifyignore and .gitnexusignore keep
+# their existing tracked status, as do CLAUDE.md and CONTEXT.md — the latter is
+# cited by 20 committed files and must stay versioned. Do not widen these to
+# /.claude*, /.agents*, /modules/**, or /*.json — a bare /.claude* would also
+# swallow the sibling .claudeignore, which must stay tracked.
 /.agents/
 /skills-lock.json
-/.claude/
+#
+# .claude/ stays ignored by default, EXCEPT for an owner-authorized narrow
+# exception (Task 24B prerequisite): exactly six DBHub connection-pool-repair
+# source files are made eligible for ordinary version control. Git cannot
+# re-include a path whose parent directory is excluded, so the former blanket
+# /.claude/ is expanded into a level-by-level cascade — re-include each parent
+# directory, re-ignore its contents, then allowlist the exact files. Everything
+# else under .claude/ (credentials such as dbhub.toml, local configuration,
+# memory, logs, temp, and the generated node_modules/ tree) stays ignored. Do NOT
+# add further re-includes without explicit owner authorization.
+/.claude/*
+!/.claude/scripts/
+/.claude/scripts/*
+!/.claude/scripts/dbhub-mcp.cjs
+!/.claude/tools/
+/.claude/tools/*
+!/.claude/tools/dbhub/
+/.claude/tools/dbhub/*
+!/.claude/tools/dbhub/package.json
+!/.claude/tools/dbhub/package-lock.json
+!/.claude/tools/dbhub/patch-target.cjs
+!/.claude/tools/dbhub/provision.cjs
+!/.claude/tools/dbhub/README.md
 /modules/custom_webform_handlers/.claude/
 /.mcp.json
 
@@ -216,3 +239,14 @@ graph.json
 # The rule lives here rather than in .ddev/.gitignore because DDEV rewrites
 # that file on every start and would drop it.
 /.ddev/.env.nominatim
+
+# Generated DDEV web-container environment file. It carries the local database
+# connection (user:password@host) that `ddev debug compose-config` resolves, so
+# it is a per-machine secret, not portable project configuration. It currently
+# exists on disk and is ignored only by the local, un-published
+# .git/info/exclude (/.ddev/.env.* there) -- the versioned rule for its sibling
+# .ddev/.env.nominatim did not cover it. Anchored to the exact path for the same
+# reason as above: DDEV rewrites .ddev/.gitignore on every start, so the rule
+# must live here. Do not widen to /.ddev/ or /.ddev/.env*, which could reach
+# authored .ddev/ configuration.
+/.ddev/.env.web

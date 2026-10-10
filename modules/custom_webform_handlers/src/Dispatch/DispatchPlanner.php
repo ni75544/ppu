@@ -4,6 +4,10 @@ namespace Drupal\custom_webform_handlers\Dispatch;
 
 use Drupal\Component\Datetime\TimeInterface;
 use Drupal\Core\Config\ConfigFactoryInterface;
+use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\custom_webform_handlers\Checkout\AcceptedJob;
+use Drupal\custom_webform_handlers\Checkout\QuoteSnapshot;
+use Drupal\custom_webform_handlers\Dispatch\Admission\BookingAdmissionStoreInterface;
 use Drupal\custom_webform_handlers\Dispatch\Policy\DispatchEligibilityInterface;
 use Drupal\custom_webform_handlers\Dispatch\Policy\ServiceDurationPolicyInterface;
 use Drupal\custom_webform_handlers\Dispatch\Route\DispatchRouteEstimatorInterface;
@@ -92,6 +96,12 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     private readonly DispatchRequestFactory $requestFactory,
     private readonly DispatchOwner $owner,
     private readonly DispatchHoldWindow $holdWindow,
+    private readonly EntityTypeManagerInterface $entityTypeManager,
+    // Booking admission store (Task 24C, Batch 1). Held, not called: this batch is
+    // inert wiring, so the constructor only assigns it and no method here reads an
+    // admission table. The first call is added later behind booking_admission.enforce,
+    // which ships false, so an unmigrated site is unaffected by this injection.
+    private readonly BookingAdmissionStoreInterface $bookingAdmissionStore,
   ) {}
 
   /**
@@ -230,8 +240,85 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
   /**
    * {@inheritdoc}
    */
-  public function createCheckoutHold(DispatchRequest $request, Slot $slot): HoldResult {
-    return $this->createHoldFor($request, $slot, PlanAuthority::Visitor, $this->finalRouteEstimator);
+  public function createCheckoutHold(DispatchRequest $request, Slot $slot, QuoteSnapshot $quote): HoldResult {
+    // The composed form of the three checkout phases, run in the one order they
+    // have always run: prepare (route I/O, before any lock), claim (under the
+    // Resource Calendar Guard), publish (the session receipt). It exists so the
+    // current single-call callers - DispatchCheckoutManager::start() among them -
+    // keep their exact behaviour and outcomes while the phases become separately
+    // callable for a future transaction-owning caller. This wrapper is NOT that
+    // caller: it publishes the receipt as soon as the claim succeeds, because
+    // nothing here owns an outer transaction whose commit it could wait for. Moving
+    // publication to after an outer commit is the deliberate transaction-integration
+    // step, and it is not performed here.
+    $prepared = $this->prepareCheckoutHold($request, $slot, $quote);
+    if ($prepared instanceof DispatchReason) {
+      return HoldResult::refused($prepared);
+    }
+    $result = $this->claimPreparedCheckoutHold($prepared);
+    if ($result->hold !== NULL) {
+      $this->publishCheckoutHoldReceipt($result->hold);
+    }
+    return $result;
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function prepareCheckoutHold(DispatchRequest $request, Slot $slot, QuoteSnapshot $quote): PreparedHold|DispatchReason {
+    // The accepted quote's four facts are decomposed here, at the checkout-only
+    // seam, and handed to the shared preparation as plain values. The Dispatch
+    // layer never holds the Checkout snapshot object - DispatchClaim has always
+    // spoken in scalars - so the coupling to Commerce stops at this one method. The
+    // first fact is the quote's binding identity, not its bare snapshotId: for a
+    // current-format quote that is a versioned composite of the priced figure AND
+    // the accepted-job identity (Task 24B / E09), so the reservation persists a
+    // value that names the JOB, not merely its price, and two materially different
+    // jobs that price identically no longer share a binding. The reservation stores
+    // it opaquely and confirmation compares it whole; a legacy quote yields the
+    // bare snapshotId unchanged, so nothing already persisted shifts meaning.
+    //
+    // The estimator is fixed to the final route estimator HERE, server-side; it is
+    // never a parameter of this method. The checkout-only final-route authority
+    // therefore cannot be reached by a public caller handing in an estimator or a
+    // fabricated prepared value: a public endpoint has no access to this @internal
+    // interface at all, and the only way to obtain a PreparedHold bound to the
+    // final estimator is to pass through this validated seam.
+    return $this->prepareHold(
+      $request,
+      $slot,
+      PlanAuthority::Visitor,
+      $this->finalRouteEstimator,
+      $quote->bindingIdentity(),
+      $quote->amountCents,
+      $quote->currency,
+      $quote->rateVersion,
+    );
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function claimPreparedCheckoutHold(PreparedHold $prepared): HoldResult {
+    // The guarded claim alone: no route I/O (the locked revalidation is restricted
+    // to the facts prepared above) and no session receipt. The returned HoldResult
+    // is the existing shape, held or refused by the existing capacity rules. A
+    // future caller may run this inside its own writer transaction; it neither
+    // opens nor commits one here, and claimWithRevalidation() still runs its own
+    // guard transaction exactly as before, so extracting the phase does not by
+    // itself make the surrounding booking atomic.
+    return $this->claimPreparedHold($prepared);
+  }
+
+  /**
+   * {@inheritdoc}
+   */
+  public function publishCheckoutHoldReceipt(Hold $hold): void {
+    // The receipt publication as an explicit, separately callable step. A future
+    // transaction-owning caller invokes this only AFTER its outermost commit has
+    // succeeded, so a receipt is never published for a Hold a rollback would
+    // unwind. The hold token stays server-side regardless.
+    $this->publishHoldReceipt($hold);
   }
 
   /**
@@ -250,19 +337,115 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
    * session to own the Hold: a staff Hold is owned by the operator's own session
    * for the moments it exists, and is released rather than left to lapse if the
    * confirmation that follows it does not complete.
+   *
+   * The four price-snapshot facts are the one thing that is not shared. Only a
+   * checkout has a server-authoritative Commerce quote, so only createCheckoutHold()
+   * supplies them; the public and staff callers leave them NULL, because a Hold
+   * they take carries no accepted price. They are threaded straight into the
+   * store-facing DispatchClaim so the amount, currency, snapshot identity, and
+   * pricing-policy version are written atomically with the claim rather than
+   * patched onto the Reservation afterwards.
+   *
+   * @param \Drupal\custom_webform_handlers\Dispatch\DispatchRequest $request
+   *   The normalised job.
+   * @param \Drupal\custom_webform_handlers\Dispatch\Slot $slot
+   *   The pickup-arrival option being claimed.
+   * @param \Drupal\custom_webform_handlers\Dispatch\PlanAuthority $authority
+   *   Whose eligibility assessment is read; nothing physical is relaxed for either.
+   * @param \Drupal\custom_webform_handlers\Dispatch\Route\DispatchRouteEstimatorInterface $estimator
+   *   The route estimator the caller's authority is allowed to use.
+   * @param string|null $priceSnapshotId
+   *   Checkout only: identity of the accepted quote, otherwise NULL.
+   * @param int|null $priceSnapshotCents
+   *   Checkout only: accepted amount in minor units, otherwise NULL.
+   * @param string|null $priceSnapshotCurrency
+   *   Checkout only: accepted currency, otherwise NULL.
+   * @param string|null $priceSnapshotVersion
+   *   Checkout only: pricing-policy version the quote was computed under, else NULL.
    */
   private function createHoldFor(
     DispatchRequest $request,
     Slot $slot,
     PlanAuthority $authority,
     DispatchRouteEstimatorInterface $estimator,
+    ?string $priceSnapshotId = NULL,
+    ?int $priceSnapshotCents = NULL,
+    ?string $priceSnapshotCurrency = NULL,
+    ?string $priceSnapshotVersion = NULL,
   ): HoldResult {
+    // Preparation, the guarded claim, and the session receipt were once welded
+    // together here. They are three private operations now - prepareHold(),
+    // claimPreparedHold(), publishHoldReceipt() - composed in the one order they
+    // have always run, so every current caller (the public hold, staff
+    // confirmation, and the checkout wrapper) keeps its exact behaviour and
+    // outcomes. The seam exists for a future transaction-owning caller that must
+    // run only the claim inside its writer transaction; this method is not that
+    // caller and publishes the receipt as soon as the claim succeeds.
+    $prepared = $this->prepareHold($request, $slot, $authority, $estimator, $priceSnapshotId, $priceSnapshotCents, $priceSnapshotCurrency, $priceSnapshotVersion);
+    if ($prepared instanceof DispatchReason) {
+      return HoldResult::refused($prepared);
+    }
+
+    $result = $this->claimPreparedHold($prepared);
+
+    if ($result->hold !== NULL) {
+      $this->publishHoldReceipt($result->hold);
+    }
+
+    return $result;
+  }
+
+  /**
+   * Validates the request and derives the claim-ready plan, taking no lock.
+   *
+   * This is the preparation phase of createHoldFor(), lifted out whole and
+   * behaviour-for-behaviour unchanged: the same ownership, session, hold-lifetime,
+   * slot-normalisation and slot/form gates in the same order, each refusing with
+   * the same DispatchReason, followed by the same plan derivation. The route I/O
+   * the plan rests on happens HERE, before any guard row is held, which is the
+   * whole point of separating it - a future caller runs this before opening its
+   * writer transaction, never inside it.
+   *
+   * It returns a request-scoped PreparedHold carrying exactly what the claim phase
+   * consumes, or a DispatchReason when any gate refuses. It performs no reservation
+   * claim and publishes no receipt.
+   *
+   * @param \Drupal\custom_webform_handlers\Dispatch\DispatchRequest $request
+   *   The normalised job.
+   * @param \Drupal\custom_webform_handlers\Dispatch\Slot $slot
+   *   The pickup-arrival option being prepared.
+   * @param \Drupal\custom_webform_handlers\Dispatch\PlanAuthority $authority
+   *   Whose eligibility assessment is read; nothing physical is relaxed for either.
+   * @param \Drupal\custom_webform_handlers\Dispatch\Route\DispatchRouteEstimatorInterface $estimator
+   *   The route estimator the caller's authority is allowed to use.
+   * @param string|null $priceSnapshotId
+   *   Checkout only: identity of the accepted quote, otherwise NULL.
+   * @param int|null $priceSnapshotCents
+   *   Checkout only: accepted amount in minor units, otherwise NULL.
+   * @param string|null $priceSnapshotCurrency
+   *   Checkout only: accepted currency, otherwise NULL.
+   * @param string|null $priceSnapshotVersion
+   *   Checkout only: pricing-policy version the quote was computed under, else NULL.
+   *
+   * @return \Drupal\custom_webform_handlers\Dispatch\PreparedHold|\Drupal\custom_webform_handlers\Dispatch\DispatchReason
+   *   The claim-ready context, or the reason preparation refused.
+   */
+  private function prepareHold(
+    DispatchRequest $request,
+    Slot $slot,
+    PlanAuthority $authority,
+    DispatchRouteEstimatorInterface $estimator,
+    ?string $priceSnapshotId = NULL,
+    ?int $priceSnapshotCents = NULL,
+    ?string $priceSnapshotCurrency = NULL,
+    ?string $priceSnapshotVersion = NULL,
+  ): PreparedHold|DispatchReason {
     // 1. Does dispatch own this Webform at all?
     //
     // A Webform still running the older fixed-slot workflow is refused here, so
     // the two guards can never both enforce the same submission.
     if (!$this->dispatchOwnsWebform($request->webformId)) {
-      return HoldResult::refused(DispatchReason::NotConfigured);
+      return DispatchReason::NotConfigured;
     }
 
     // 2. Is there a session to own the Hold?
@@ -274,7 +457,7 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
       $this->logger->notice('A Dispatch Hold was requested for @webform without a session to own it; refusing.', [
         '@webform' => $request->webformId,
       ]);
-      return HoldResult::refused(DispatchReason::InvalidRequest);
+      return DispatchReason::InvalidRequest;
     }
 
     $holdSeconds = $this->holdSeconds();
@@ -283,13 +466,13 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
       // class invented. Capacity is held for as long as an operator said, or not
       // at all.
       $this->logger->error('holds.hold_seconds is not configured, so no Dispatch Hold can be claimed.');
-      return HoldResult::refused(DispatchReason::NotConfigured);
+      return DispatchReason::NotConfigured;
     }
 
     // 3. Normalise the Slot against the Resource it names.
     $normalised = $this->normalisedSlot($slot);
     if ($normalised === NULL) {
-      return HoldResult::refused(DispatchReason::InvalidRequest);
+      return DispatchReason::InvalidRequest;
     }
     [$slot, $profile] = $normalised;
 
@@ -299,53 +482,98 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
         '@webform' => $request->webformId,
         '@slot_webform' => $slot->webformId,
       ]);
-      return HoldResult::refused(DispatchReason::InvalidRequest);
+      return DispatchReason::InvalidRequest;
     }
 
     // 4. Derive the plan exactly, against the neighbours that actually exist.
     //
     // Advisory at this point: the guard rows are not held yet, so everything read
     // here can change before the claim is written. It is derived now because the
-    // storage seam needs a candidate to know which days to lock.
+    // storage seam needs a candidate to know which days to lock, and because the
+    // external route facts it rests on must be prepared before any lock is taken.
     $plan = $this->preparePlanFor($request, $slot, $profile, NULL, $authority, $estimator);
     if ($plan instanceof DispatchReason) {
-      return HoldResult::refused($plan);
+      return $plan;
     }
 
-    // 5. Claim it, re-deriving the same plan while the guard rows are locked.
-    //
-    // The pre-transaction plan is never claimed on its own authority. Under the
-    // locks the neighbours are re-read and every required leg must match a fresh
-    // fact prepared above. The claim is written only if the window and protected
-    // margins still fit. A competing neighbour absent from that prepared set makes
-    // the callback refuse without performing provider I/O.
-    $result = $this->store->claimWithRevalidation(
+    // The preparation is complete: everything the guarded claim consumes is now in
+    // hand, including the prepared route facts the locked revalidation is confined
+    // to. No reservation has been claimed and no receipt published.
+    return new PreparedHold(
+      $request,
+      $plan,
+      $profile,
+      $ownerId,
+      $holdSeconds,
+      $authority,
+      $estimator,
+      $priceSnapshotId,
+      $priceSnapshotCents,
+      $priceSnapshotCurrency,
+      $priceSnapshotVersion,
+    );
+  }
+
+  /**
+   * Claims the prepared Slot under the Resource Calendar Guard.
+   *
+   * This is the only phase that takes a lock, and it adds no external facts to
+   * the ones already prepared. The claim is written from the prepared plan, and
+   * the locked revalidation re-derives that plan against the neighbours present
+   * at the instant the guard rows are held — reading only the route facts carried
+   * in the plan, performing no provider I/O. A competing neighbour whose required
+   * leg is absent from those facts makes the callback refuse rather than fetch one
+   * under the lock.
+   *
+   * It publishes no receipt and touches no cart. The returned HoldResult is the
+   * same shape every caller already handles, so this phase composes inside a
+   * future caller-owned transaction without that caller learning anything new —
+   * and without this method committing one.
+   */
+  private function claimPreparedHold(PreparedHold $prepared): HoldResult {
+    $plan = $prepared->plan;
+
+    // Claim it, re-deriving the same plan while the guard rows are locked. The
+    // pre-lock plan is never claimed on its own authority: under the locks the
+    // neighbours are re-read and every required leg must match a fact prepared
+    // before the guard was acquired. The accepted price facts are written with
+    // the claim, atomically, exactly as the pre-separation flow wrote them.
+    return $this->store->claimWithRevalidation(
       new DispatchClaim(
         $plan->offer->slot,
         $plan->offer->window,
         $plan->inboundRepositionSeconds,
         $plan->outboundRepositionSeconds,
-        $ownerId,
-        $holdSeconds,
-        $request->pickupAddress,
-        $request->deliveryAddress,
+        $prepared->ownerId,
+        $prepared->holdSeconds,
+        $prepared->request->pickupAddress,
+        $prepared->request->deliveryAddress,
         $plan->routeSeconds,
         $plan->routeMeters,
+        $prepared->priceSnapshotId,
+        $prepared->priceSnapshotCents,
+        $prepared->priceSnapshotCurrency,
+        $prepared->priceSnapshotVersion,
       ),
       // Read-only and provider-free: all external facts were prepared before the
       // Resource Calendar Guard was acquired.
-      fn(): DispatchReason => $this->replanUnderLock($request, $plan, $profile, NULL, $authority, $estimator),
+      fn(): DispatchReason => $this->replanUnderLock($prepared->request, $plan, $prepared->profile, NULL, $prepared->authority, $prepared->estimator),
     );
+  }
 
-    // 6. Keep the receipt in the session that owns it.
-    //
-    // This is what lets the submission path find its own Hold without the token
-    // travelling through a form element, so the token need never be rendered.
-    if ($result->hold !== NULL) {
-      $this->owner->rememberHold($result->hold->slot, $result->hold->token, $result->hold->expiresAt);
-    }
-
-    return $result;
+  /**
+   * Publishes the session receipt for a successfully held Slot.
+   *
+   * Separated from the claim so a future transaction-owning caller can invoke it
+   * only after its outermost commit succeeds — publishing a receipt for a Hold
+   * whose row later rolled back would hand the session a token for capacity it
+   * never obtained. The hold credentials stay server-side: the token reaches the
+   * owner store, never a form element, response, or drupalSettings. This method
+   * is not itself a commit, and the hold's existence is not proof the enclosing
+   * transaction committed.
+   */
+  private function publishHoldReceipt(Hold $hold): void {
+    $this->owner->rememberHold($hold->slot, $hold->token, $hold->expiresAt);
   }
 
   /**
@@ -358,8 +586,8 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
   /**
    * {@inheritdoc}
    */
-  public function confirmCheckoutReservation(Hold $hold, WebformSubmissionInterface $submission): ReservationResult {
-    return $this->confirmFor($hold, $submission, PlanAuthority::Visitor, $this->finalRouteEstimator);
+  public function confirmCheckoutReservation(Hold $hold, WebformSubmissionInterface $submission, string $acceptedJobFactsDigest, string $acceptedSnapshotId): ReservationResult {
+    return $this->confirmFor($hold, $submission, PlanAuthority::Visitor, $this->finalRouteEstimator, $acceptedJobFactsDigest, $acceptedSnapshotId);
   }
 
   /**
@@ -379,6 +607,8 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     WebformSubmissionInterface $submission,
     PlanAuthority $authority,
     DispatchRouteEstimatorInterface $estimator,
+    string $acceptedJobFactsDigest = '',
+    string $acceptedSnapshotId = '',
   ): ReservationResult {
     $submissionId = (int) $submission->id();
     if ($submissionId < 1) {
@@ -452,16 +682,84 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
       $token,
       $ownerId,
       $submissionId,
-      // Read-only and provider-free. A neighbour not represented in the prepared
-      // set refuses instead of becoming a network call under the lock.
-      fn(LockedHold $locked): DispatchReason => $this->revalidate(
-        $locked,
+      // Read-only and provider-free, and the ONLY place the current job's identity is
+      // read. The accepted side ($acceptedJobFactsDigest) is the immutable sealed
+      // identity the attempt recorded at acceptance and is correctly the frozen value;
+      // only the mutable current side is read here, inside the guard's locked callback,
+      // through the one shared canonicalization.
+      //
+      // The current side is re-read from PERSISTED storage, not from the in-memory
+      // $submission the caller captured before the lock: loadUnchanged() bypasses the
+      // entity static and persistent caches and reads the row on this same connection,
+      // so a material edit SAVED before confirmation is seen here (read-your-writes
+      // within the guarded transaction) and moves the recomputed digest, and the
+      // request is rebuilt from that fresh submission so a changed endpoint counts too.
+      // Rebuilding is pure canonicalization over already-stored strings —
+      // fromSubmission() and AcceptedJob make no provider, geocode or route call — so it
+      // honours the locked callback's bounded, provider-free contract. It runs only when
+      // there is an accepted identity to check, leaving a genuine legacy attempt (empty
+      // accepted digest) untouched.
+      //
+      // HONEST BOUNDARY: this closes the stale-object case — an edit committed BEFORE
+      // confirmation — with no schema change. It does NOT close the concurrent-writer
+      // race: the calendar guard locks resource/day rows, not the webform_submission
+      // row, so a writer committing to that row DURING this transaction is not
+      // serialized against this read (and under REPEATABLE READ this re-read would not
+      // see it). Closing that race needs a submission-revision CAS or a submission-row
+      // lock — a schema change outside this task's authorized scope. The residual is
+      // bounded to detection integrity, not value: the reservation's pickup/delivery
+      // addresses are fixed at start() and never rewritten by confirmation or
+      // settlement, and the Commerce order carries no job address, so a late edit
+      // cannot redirect a booking or move a price.
+      function (LockedHold $locked) use (
         $preparedHold,
         $preparedPlan,
         $request,
+        $submissionId,
         $authority,
         $estimator,
-      ),
+        $acceptedJobFactsDigest,
+        $acceptedSnapshotId,
+      ): DispatchReason {
+        // Only re-derive the current identity when there is an accepted identity to
+        // compare it against; a genuine legacy attempt recorded no digest and the
+        // job-facts axis is skipped for it in revalidate().
+        $currentJobFactsDigest = '';
+        if ($acceptedJobFactsDigest !== '') {
+          $freshSubmission = $this->entityTypeManager
+            ->getStorage('webform_submission')
+            ->loadUnchanged($submissionId);
+          if (!$freshSubmission instanceof WebformSubmissionInterface) {
+            $this->logger->notice('Dispatch confirmation refused on submission @sid: it could not be reloaded to prove the accepted job still matches.', [
+              '@sid' => $submissionId,
+            ]);
+            return DispatchReason::InvalidRequest;
+          }
+          $freshRequest = $this->requestFactory->fromSubmission($freshSubmission);
+          if ($freshRequest === NULL) {
+            $this->logger->notice('Dispatch confirmation refused on submission @sid: the reloaded submission is no longer a dispatch-owned request.', [
+              '@sid' => $submissionId,
+            ]);
+            return DispatchReason::InvalidRequest;
+          }
+          $currentJobFactsDigest = AcceptedJob::fromSubmissionData(
+            $freshSubmission->getData(),
+            $freshRequest->pickupAddress,
+            $freshRequest->deliveryAddress,
+          )->digest;
+        }
+        return $this->revalidate(
+          $locked,
+          $preparedHold,
+          $preparedPlan,
+          $request,
+          $authority,
+          $estimator,
+          $acceptedJobFactsDigest,
+          $currentJobFactsDigest,
+          $acceptedSnapshotId,
+        );
+      },
     );
 
     if ($result->reservationId !== NULL) {
@@ -718,6 +1016,9 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
     DispatchRequest $request,
     PlanAuthority $authority,
     DispatchRouteEstimatorInterface $estimator,
+    string $acceptedJobFactsDigest = '',
+    string $currentJobFactsDigest = '',
+    string $acceptedSnapshotId = '',
   ): DispatchReason {
     if ($locked->reservationId !== $preparedHold->reservationId
       || $locked->webformId !== $request->webformId
@@ -725,6 +1026,75 @@ final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPl
       || $locked->slot->webformId !== $preparedHold->slot->webformId
       || $locked->slot->startTimestamp !== $preparedHold->slot->startTimestamp) {
       // The Hold belongs to a different form than the submission confirming it.
+      return DispatchReason::InvalidRequest;
+    }
+
+    // The accepted snapshot must be the one THIS reservation was held for (Task 24B
+    // / E09). price_snapshot_id was written onto the reservation atomically with the
+    // claim and is read here under the lock via LockedHold — persisted authority, not
+    // a value carried in unlocked alongside the token. Binding to it is what makes
+    // the identity comparison below trustworthy: it proves the accepted job whose
+    // digest is being compared is the job this very reservation was created against,
+    // closing the gap where moving hash_equals() under the lock still compared two
+    // caller-supplied values that nothing tied to the stored hold. This is a bounded
+    // local string comparison — no I/O, no provider — so it honours the locked-callback
+    // contract.
+    //
+    // The refusal is VERSION-AWARE, because missing data alone is not proof of legacy
+    // status. $acceptedSnapshotId is the accepted snapshot's binding identity
+    // (QuoteSnapshot::bindingIdentity()): a current-format snapshot folds the accepted
+    // job identity into the id and carries BINDING_IDENTITY_PREFIX; a genuine legacy
+    // snapshot carries only its bare id, no prefix. A current-format accepted checkout
+    // therefore wrote a versioned binding onto its reservation at start(), so a
+    // NULL/empty stored id read under the lock is NOT a pre-column reservation — it is
+    // a reservation a current-format confirmation cannot prove it owns, and it REFUSES.
+    // Only a legacy accepted checkout (no prefix) tolerates an absent stored id, since
+    // those reservations genuinely predate the column; when a legacy id IS stored it is
+    // still compared and a mismatch refuses. A current-format STORED binding, however,
+    // is never tolerated against a non-current-format accepted id: a reservation whose
+    // price_snapshot_id carries BINDING_IDENTITY_PREFIX was minted current-format, so an
+    // empty or bare accepted id cannot prove ownership of it and MUST refuse rather than
+    // fall through the legacy branch (Task 24B §7 — a current-format record must not
+    // downgrade into acceptance). Cross-vintage pairings do not arise from a single
+    // start(), where the attempt and reservation are minted under one code version; this
+    // is defence in depth for a corrupted/absent accepted binding, so the gate honours the
+    // safe direction it documents instead of only claiming to. Only a genuinely absent
+    // stored id (a pre-column reservation) tolerates an empty/bare accepted id.
+    $acceptedIsCurrentFormat = str_starts_with($acceptedSnapshotId, QuoteSnapshot::BINDING_IDENTITY_PREFIX);
+    $storedBinding = $locked->priceSnapshotId;
+    $storedBindingPresent = $storedBinding !== NULL && $storedBinding !== '';
+    $storedIsCurrentFormat = $storedBindingPresent
+      && str_starts_with((string) $storedBinding, QuoteSnapshot::BINDING_IDENTITY_PREFIX);
+    $bindingRefuses = $acceptedIsCurrentFormat
+      ? (!$storedBindingPresent || !hash_equals($storedBinding, $acceptedSnapshotId))
+      : ($storedIsCurrentFormat
+        || ($acceptedSnapshotId !== '' && $storedBindingPresent && !hash_equals($storedBinding, $acceptedSnapshotId)));
+    if ($bindingRefuses) {
+      $this->logger->notice('Dispatch confirmation refused on @webform: the accepted price snapshot is not the one this reservation was held for.', [
+        '@webform' => $request->webformId,
+      ]);
+      return DispatchReason::InvalidRequest;
+    }
+
+    // The accepted job must still be the job the submission now describes (Task 24B
+    // / E09). The accepted digest ($acceptedJobFactsDigest) is the immutable sealed
+    // identity the attempt recorded at acceptance — correctly the frozen value. The
+    // current digest ($currentJobFactsDigest) is NOT prefetched here: it is recomputed
+    // from the saved submission by the confirmWithRevalidation callback UNDER this lock
+    // and passed in, through the one shared canonicalization, so the comparison is
+    // against what the submission holds at confirmation. hash_equals() over the two is
+    // a constant-time comparison and no external work — exactly what the locked callback
+    // contract permits. It is checked here, ahead of the timing re-derivation below,
+    // because timing is not identity: an address moved to a point that routes the same,
+    // a package resized within a tier, a handling flag toggled that adds no line each
+    // leave the Dispatch Window and the reserved duration untouched while changing
+    // the job the customer accepted a price for. An empty accepted digest is a
+    // genuine legacy attempt that recorded no identity, and the check is skipped
+    // for it rather than allowed to fail closed against every current job.
+    if ($acceptedJobFactsDigest !== '' && !hash_equals($acceptedJobFactsDigest, $currentJobFactsDigest)) {
+      $this->logger->notice('Dispatch confirmation refused on @webform: the accepted job no longer matches the submission, though its price and reserved duration are unchanged.', [
+        '@webform' => $request->webformId,
+      ]);
       return DispatchReason::InvalidRequest;
     }
 

@@ -280,14 +280,21 @@ final class QuoteCalculator {
           $this->manualReviewReasons[] = 'missing_delivery_mode';
         }
 
-        // Urgency is an upsell rather than a fact the price depends on, so a tier
-        // nobody has priced simply adds nothing instead of forcing review.
-        $urgency = (string) ($data['courier_urgency'] ?? 'standard');
-        if ($urgency !== '' && $urgency !== 'standard') {
-          $amount = $this->positiveInt($config->get('quote.courier.urgency_surcharge_cents.' . $urgency), 0);
-          $this->addLine('courier_urgency', ucfirst(str_replace('_', ' ', $urgency)) . ' service', $amount);
-          $total_cents += $amount;
-        }
+        // Express Courier is a single standard-priced service: always one driver on
+        // one standard run. The service level is canonicalised to 'standard' here, at
+        // the one calculator every caller shares, so the browser preview, the Dispatch
+        // offer endpoint, the submission gate and the checkout requote all price and
+        // report the same level — not merely the same total. Canonicalising the value
+        // (rather than only zeroing a surcharge) means no downstream line, snapshot or
+        // audit trail carries a "rush"/"expedited" label the booking does not honour.
+        // The submission path also writes 'standard' onto the stored submission
+        // (AddressDistanceHandler::canonicalizeCourierInputs) and the Courier UI no
+        // longer offers the retired tiers, so a rush/expedited value can only be stale
+        // wizard state or a crafted body; either way it collapses to standard here with
+        // no surcharge, which is why the preview figure the browser accepts now equals
+        // the figure the submission recomputes and the acceptance gate stops looping.
+        // Other services keep their own urgency handling; this branch is courier-only
+        // and applies no urgency surcharge at all — courier_urgency is not read here.
 
         // Contents. Only a clear acknowledgment prices; "restricted" or "not sure"
         // means staff read the request before a figure is shown. The booking-side

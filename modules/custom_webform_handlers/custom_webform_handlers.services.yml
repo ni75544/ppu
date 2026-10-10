@@ -88,6 +88,8 @@ services:
       - '@config.factory'
       - '@logger.channel.custom_webform_handlers'
       - '@datetime.time'
+      - true
+      - '@custom_webform_handlers.routing_mode_resolver'
 
   # The fallback chain owns caching and reserves budget immediately before this
   # adapter can dispatch. Its internal legacy cache is therefore disabled here.
@@ -100,6 +102,79 @@ services:
       - '@logger.channel.custom_webform_handlers'
       - '@datetime.time'
       - false
+      - '@custom_webform_handlers.routing_mode_resolver'
+
+  # Zero-cost development routing guard (Task 21A).
+  #
+  # One customer-route entry facade that every quote, pre-save and checkout seam
+  # calls; a deterministic no-HTTP development provider; and the resolver that
+  # chooses between them. DDEV resolves to development_fixed in code (the
+  # IS_DDEV_PROJECT signal RoutingModeResolver reads), so local development and
+  # non-billing verification make no outbound routing request, while production
+  # keeps the cache-first live Google adapter and its one-request controls
+  # unchanged. The resolver is also injected into both Google adapters above so
+  # that even a caller wired directly to one fails closed in development_fixed.
+  custom_webform_handlers.routing_mode_resolver:
+    class: Drupal\custom_webform_handlers\Distance\RoutingModeResolver
+    arguments:
+      - '@config.factory'
+
+  custom_webform_handlers.fixed_development_route_provider:
+    class: Drupal\custom_webform_handlers\Distance\FixedDevelopmentRouteProvider
+    arguments:
+      - '@datetime.time'
+
+  custom_webform_handlers.customer_route_entry_provider:
+    class: Drupal\custom_webform_handlers\Distance\RoutingModeEntryProvider
+    arguments:
+      - '@custom_webform_handlers.routing_mode_resolver'
+      - '@custom_webform_handlers.google_routes_distance_provider'
+      - '@custom_webform_handlers.fixed_development_route_provider'
+
+  # The one answer to "whose route request is this", shared by the fact store and
+  # the operation ledger so a fact stored under one owner is read back under the
+  # same owner. Authenticated requests are owned by uid (stable across sessions);
+  # anonymous requests by a hash of the session id. Given only the current user
+  # and the request stack, because owner identity is all it decides.
+  custom_webform_handlers.route_request_owner:
+    class: Drupal\custom_webform_handlers\Distance\RouteRequestOwner
+    arguments:
+      - '@current_user'
+      - '@request_stack'
+
+  # Server custody of one browser's calculated route facts, keyed by an opaque
+  # reference and scoped to the owner by PrivateTempStore. This is what lets a
+  # quote-only reprice be authenticated against a fact the server actually
+  # produced, rather than against a distance blob and an address-hash the browser
+  # posts back — the latter being forgeable by any client that knows the pair.
+  #
+  # The lock is a distinct, fact-store-specific one, taken last and released at
+  # once around the read-modify-write of the bounded per-owner map, never around a
+  # provider call or a transaction; the owner resolver scopes what it keeps.
+  custom_webform_handlers.route_fact_store:
+    class: Drupal\custom_webform_handlers\Distance\RouteFactStore
+    arguments:
+      - '@tempstore.private'
+      - '@config.factory'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+      - '@lock'
+      - '@custom_webform_handlers.route_request_owner'
+
+  # The server-side close on repeating a billed route calculation: it records what
+  # a route_preview operation did so a replay after a lost response, or a
+  # concurrent duplicate, returns the recorded outcome instead of dialling the
+  # provider again. Deliberately its own store (keyvalue.expirable, DB-backed with
+  # native per-entry expiry — no migration, no schema), separate from the fact
+  # store, so evicting the oldest fact can never erase an operation's replay
+  # protection. It stores and acquires no lock; the single-flight lock is the
+  # controller's.
+  custom_webform_handlers.route_operation_ledger:
+    class: Drupal\custom_webform_handlers\Distance\RouteOperationLedger
+    arguments:
+      - '@keyvalue.expirable'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
 
   # Provider adapters remain private behind purpose-specific chains.
   custom_webform_handlers.osrm_distance_provider:
@@ -111,6 +186,7 @@ services:
       - '@settings'
       - '@datetime.time'
       - '@logger.channel.custom_webform_handlers'
+      - '@custom_webform_handlers.routing_mode_resolver'
 
   custom_webform_handlers.mapbox_distance_provider:
     class: Drupal\custom_webform_handlers\Distance\MapboxDistanceProvider
@@ -121,6 +197,7 @@ services:
       - '@settings'
       - '@datetime.time'
       - '@logger.channel.custom_webform_handlers'
+      - '@custom_webform_handlers.routing_mode_resolver'
 
   custom_webform_handlers.distance_provider:
     alias: custom_webform_handlers.distance_provider_chain.ordinary
@@ -142,6 +219,7 @@ services:
       - '@request_stack'
       - '@datetime.time'
       - '@logger.channel.custom_webform_handlers'
+      - '@custom_webform_handlers.routing_mode_resolver'
 
   custom_webform_handlers.offer_distance_provider:
     class: Drupal\custom_webform_handlers\Distance\ChainDistanceProvider
@@ -158,6 +236,7 @@ services:
       - '@request_stack'
       - '@datetime.time'
       - '@logger.channel.custom_webform_handlers'
+      - '@custom_webform_handlers.routing_mode_resolver'
 
   custom_webform_handlers.final_distance_provider:
     class: Drupal\custom_webform_handlers\Distance\ChainDistanceProvider
@@ -175,6 +254,7 @@ services:
       - '@request_stack'
       - '@datetime.time'
       - '@logger.channel.custom_webform_handlers'
+      - '@custom_webform_handlers.routing_mode_resolver'
 
 
   custom_webform_handlers.quote_calculator:
@@ -189,6 +269,9 @@ services:
       - '@database'
       - '@datetime.time'
       - '@logger.channel.custom_webform_handlers'
+      # Booking admission store (Task 24C Batch 1): held, not called. Wiring only —
+      # no admission read on construction; booking_admission.enforce ships false.
+      - '@custom_webform_handlers.booking_admission_store'
 
   custom_webform_handlers.reservation_owner:
     class: Drupal\custom_webform_handlers\Reservation\ReservationOwner
@@ -226,6 +309,23 @@ services:
       - '@database'
       - '@datetime.time'
       - '@custom_webform_handlers.dispatch_calendar_guard'
+      - '@logger.channel.custom_webform_handlers'
+
+  # Per-submission booking admission (Task 24C-1). The one job-exclusivity record a
+  # booking has: it answers "is this submission already being booked, and by whom",
+  # which the two driver-capacity families cannot answer for each other and the
+  # checkout attempt cannot answer for the staff, manual and replan paths that bypass
+  # it. Registered inert on purpose — no tag, no caller, no subscriber, no hook, and
+  # no constructor query. It creates no schema; every entry point asserts the table
+  # first and throws AdmissionSchemaMissingException when it is absent, so an explicit
+  # call on an unmigrated site fails closed rather than answering "admitted". Public
+  # so a future authorized caller can be wired to it without reopening this file.
+  custom_webform_handlers.booking_admission_store:
+    class: Drupal\custom_webform_handlers\Dispatch\Admission\BookingAdmissionStore
+    public: true
+    arguments:
+      - '@database'
+      - '@datetime.time'
       - '@logger.channel.custom_webform_handlers'
 
   # Which rules apply to the service the visitor picked. This is the only seam a
@@ -271,6 +371,8 @@ services:
       - 'offer'
       - '@datetime.time'
       - '@custom_webform_handlers.distance_provider'
+      - '@custom_webform_handlers.routing_mode_resolver'
+      - '@custom_webform_handlers.fixed_development_route_provider'
 
   custom_webform_handlers.dispatch_final_route_estimator:
     class: Drupal\custom_webform_handlers\Dispatch\Route\DistanceProviderRouteEstimator
@@ -281,6 +383,8 @@ services:
       - 'final'
       - '@datetime.time'
       - '@custom_webform_handlers.distance_provider'
+      - '@custom_webform_handlers.routing_mode_resolver'
+      - '@custom_webform_handlers.fixed_development_route_provider'
 
   # Dispatch identity and fact rebuilding. Both sit between the planner and the
   # request: the owner decides which session a Hold belongs to, and the request
@@ -346,6 +450,10 @@ services:
       - '@custom_webform_handlers.dispatch_request_factory'
       - '@custom_webform_handlers.dispatch_owner'
       - '@custom_webform_handlers.dispatch_hold_window'
+      - '@entity_type.manager'
+      # Booking admission store (Task 24C Batch 1): held, not called. Wiring only —
+      # no admission read on construction; booking_admission.enforce ships false.
+      - '@custom_webform_handlers.booking_admission_store'
 
   # How long a Hold withholds capacity. Its own service because the planner reads
   # it when it claims and the booking endpoints read it when they renew, and the
@@ -581,6 +689,16 @@ services:
       # can warm its route. Post-commit and enqueue-only by the emitter's own contract:
       # a listener cannot delay, re-decide, or undo the booking it is told about.
       - '@custom_webform_handlers.domain_event_emitter'
+      # Booking admission store (Task 24C Batch 1): held, not called. Wiring only —
+      # no admission read on construction; booking_admission.enforce ships false.
+      - '@custom_webform_handlers.booking_admission_store'
+      # The shared database connection (Task 24C-8C). start() opens one caller-owned
+      # writer transaction on it so the guarded claim, the draft Commerce order/item, and
+      # the Checkout Attempt row commit or roll back as a unit — the same '@database'
+      # the calendar guard, the dispatch reservation store, the checkout-attempt store,
+      # and Commerce entity storage all write through, so those writes nest as savepoints
+      # under it. Transaction ownership only; no admission call is wired by this.
+      - '@database'
 
   # The entry seam Step 3 begins at, and the only place a saved submission becomes
   # a payable order. It composes the derived facts start() needs — the server's own
@@ -604,11 +722,12 @@ services:
       - '@custom_webform_handlers.dispatch_request_factory'
       - '@custom_webform_handlers.dispatch_profile_factory'
       - '@custom_webform_handlers.quote_calculator'
-      - '@custom_webform_handlers.google_routes_distance_provider'
+      - '@custom_webform_handlers.route_fact_store'
       - '@config.factory'
       - '@commerce_cart.cart_session'
       - '@entity_type.manager'
       - '@logger.channel.custom_webform_handlers'
+      - '@custom_webform_handlers.routing_mode_resolver'
 
   # Issues and verifies the tracking credential a Review Request's customer holds.
   #
