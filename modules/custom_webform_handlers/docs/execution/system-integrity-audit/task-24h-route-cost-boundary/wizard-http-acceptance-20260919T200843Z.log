@@ -1,0 +1,31 @@
+Task 24H — COMPLETE bounded HTTP acceptance (ppu-qa @ schema 10046), 20260919T200843Z
+-----------------------------------------------------------------------------
+== 1. page-1 committed preview (route_preview) ==
+  PASS  preview success (=success)
+  PASS  preview minted a route_reference (=yes)
+  PASS  preview produced an accepted-quote carrier value (=yes)
+  PASS  cold preview adds exactly 1 customer-route calc (=1)
+    customer-route 0->1 ; scheduling-leg 0->0
+== 2. GET page 1, submit page 1 (with both carriers) -> page 2 ==
+  FAIL  advanced to page 2 (date field present) (expected yes, got no)
+  FAIL  page 2 re-renders the route reference populated (expected yes, got no)
+  FAIL  page 2 re-renders the accepted-quote carrier populated (expected yes, got no)
+== 3. dispatch offer for the requested date -> real offerable arrivals ==
+  PASS  offer success (=success)
+  PASS  offer returned at least one arrival (=yes)
+    first offered arrival at=1789992000
+== 4. [PRECONDITION] attempt a real advisory Hold on that arrival ==
+  PRECONDITION MET: real advisory Hold taken (status=success)
+== 5. submit page 2 (date + real arrival + both carriers) -> reach page 3 ==
+  PASS  NO 'route estimate no longer available' warning on advance (=0)
+  PASS  NO 'estimate has been updated, submit again' handshake stall (=0)
+  FAIL  actually reached page 3 (page-3-only field present) (expected yes, got no)
+  PASS  advancement adds ZERO customer-route calcs (=0)
+    customer-route 1->1 (advance = +0) ; scheduling-leg 0->2 (recorded separately: +2)
+== 6. release the probe's Hold only if one was created (leave QA as found) ==
+    released probe Hold (status=success)
+
+== TASK 24H ROUTE-COST ACCEPTANCE (substantive): 9 passed, 4 failed ==
+== customer-route 0 -> 1 (external routing is development_fixed, offline) ; scheduling-leg 0 -> 2 (separate keys, never conflated) ==
+== Hold precondition: MET ==
+SCRIPT_EXIT=1

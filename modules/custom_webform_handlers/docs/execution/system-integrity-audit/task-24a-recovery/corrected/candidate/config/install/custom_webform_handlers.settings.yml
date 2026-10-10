@@ -1,0 +1,256 @@
+# Optional client-side Google route map rendering. Address suggestions always
+# remain on the self-hosted endpoint, so typing cannot spend Google requests.
+google_maps_browser_enabled: false
+google_maps_browser_api_key: ''
+route_request_timeout: 8
+route_cache_ttl: 3600
+# Scheduled, traffic-aware routes go stale faster than time-independent ones,
+# because a live-traffic blend for a departure an hour from now stops describing
+# that departure quite quickly. Kept well under route_cache_ttl for that reason.
+route_scheduled_cache_ttl: 900
+# BEST_GUESS, PESSIMISTIC, or OPTIMISTIC. Chosen explicitly rather than left to
+# Google's default: which assumption the schedule is built on is an operational
+# decision. Raise to PESSIMISTIC where late arrivals cost more than idle time.
+route_traffic_model: BEST_GUESS
+# Departure instants are floored to this many seconds before being sent, so that
+# measuring a working day costs a handful of billed requests rather than one per
+# candidate arrival. Matches the default 30-minute booking grid.
+route_departure_bucket_seconds: 1800
+# How far ahead of now a departure must sit. Google rejects a past departure for
+# driving, and a planner legitimately asks about a working day already under way.
+route_departure_min_lead_seconds: 60
+# The margin added to a duration that carries no traffic data, as a percentage.
+# Not a traffic model — the amount by which a free-flow drive is assumed to be an
+# under-statement. A floor of 10 applies whatever is configured here.
+route_traffic_fallback_inflation_percent: 25
+preview_rate_limit: 30
+# How long an address edit must settle before the browser asks for a preview.
+# Typing must not buy a route: an edit invalidates the estimate on the first
+# keystroke and only a committed pair — an autocomplete selection, or leaving a
+# text field — spends a request. The window coalesces a burst of those commits.
+# Clamped to 100–5000 ms in the handler, so a bad value cannot disable the delay.
+preview_debounce_ms: 600
+# Customer routing mode. development_fixed serves deterministic recorded routes
+# with no outbound HTTP; live_cached uses the cache-first Google adapter with its
+# one-request-per-committed-pair controls. DDEV forces development_fixed in code
+# (RoutingModeResolver reads the IS_DDEV_PROJECT signal), so this shipped default
+# governs non-DDEV servers, where a settings.php config override may still pin it.
+# No API key or secret is stored here.
+routing_mode: live_cached
+# Multi-provider routing. Task 20G connects ordinary quote consumers to this
+# policy and gives dispatch separate offer and final chains. Provider eligibility,
+# caching, and budgets remain enforced here rather than at individual call sites.
+#
+# Read through Drupal\custom_webform_handlers\Distance\RoutingPolicy rather than key
+# by key. Its DEFAULTS array has to stay identical to what is written here: active
+# configuration on an existing site predates this subtree entirely, so until Task
+# 20F's migration runs, those defaults are the values actually in force.
+#
+# Nothing here enables a paid provider. OSRM and Mapbox are disabled because neither
+# exists yet; every metered allowance is 0, which means no calls and not no limit;
+# and Google, the provider in service today, is enabled with an allowance of 0, so
+# the new chain issues no request until an operator raises it deliberately.
+routing:
+  # Which calendar an allowance resets on: day or month.
+  billing_period: month
+  # The zone that period rolls over in. Operator-chosen and fixed, never a visitor's,
+  # so a budget cannot be reset early by a customer who is travelling.
+  billing_timezone: UTC
+  # Committed-address resolution through the self-hosted provider provisioned for
+  # Task 20D. The monthly allowance is a conservative operational ceiling for the
+  # private service, not a paid quota.
+  geocoder:
+    provider: ppu_nominatim
+    version: nycmetro-20260904T202121Z+md5.77b0c1c4
+    persist: true
+    request_allowance: 100000
+  # Purposes, not call sites. Each names the chain it may ask, in order, and the
+  # wall-clock the whole chain gets. Google appears in final only: an ordinary quote, a
+  # public offer and cache warming are all refused it by RoutingPolicy, whatever an
+  # operator writes here.
+  purposes:
+    # Ordinary quotes: the form's distance preview and the stored quote figure. The
+    # highest-volume purpose, and the one that must never be billed per keystroke.
+    ordinary:
+      order:
+        - osrm
+        - mapbox
+      deadline_ms: 4000
+      # Keyed by provider id, and layered under that provider's own allowance rather
+      # than replacing it. Empty means the provider-wide figure is the only limit.
+      request_allowance: {  }
+    # Public Slot offers and the warming that fills their cache. Traffic-aware, so
+    # OSRM cannot serve it and RoutingPolicy will not place it here.
+    offer:
+      order:
+        - mapbox
+      deadline_ms: 6000
+      request_allowance: {  }
+    # Validated final operations: the figure an operator commits to. The only purpose
+    # Google is eligible for, and the longest deadline, because what is waiting on it
+    # is a booking decision rather than a page repaint.
+    final:
+      order:
+        - mapbox
+        - google_routes
+      deadline_ms: 12000
+      request_allowance: {  }
+  providers:
+    # Self-hosted OSRM. No traffic feed, so it declares only the time-independent
+    # contract, and RoutingPolicy keeps it out of offer and final for that reason.
+    #
+    # allowed_hosts is empty deliberately. With no host allowlisted no base URL can
+    # resolve, so enabling OSRM without naming its host fails to configure rather than
+    # reaching somewhere unintended. The URL itself is not config at all — it comes
+    # from environment-backed Settings, so no config import can move where routes are
+    # fetched from, and no exported file carries an internal hostname.
+    osrm:
+      enabled: false
+      allowed_schemes:
+        - https
+      allowed_hosts: {  }
+      profile: driving
+      timeout_ms: 2500
+      cache_results: true
+      # A week. A private extract changes when its operator rebuilds it rather than
+      # continuously, and no per-request cost pushes the figure down.
+      cache_ttl: 604800
+      # Part of cache identity, so raising it after an extract rebuild is what retires
+      # routes measured against the old road network.
+      data_version: ''
+      circuit_failure_threshold: 5
+      circuit_cooldown_seconds: 60
+      circuit_half_open_probes: 1
+    # Mapbox Directions. Answers both contracts, which is why offer defaults to it.
+    #
+    # cache_results ships FALSE and is ANDed with cache_terms_recorded at runtime:
+    # whether a provider's routes may be stored past the request is a licensing
+    # question Task 20A could not settle from the published terms, so the switch alone
+    # cannot turn caching on.
+    mapbox:
+      enabled: false
+      profile: driving
+      traffic_profile: driving-traffic
+      timeout_ms: 3000
+      cache_results: false
+      cache_terms_recorded: false
+      cache_ttl: 900
+      data_version: ''
+      circuit_failure_threshold: 4
+      circuit_cooldown_seconds: 120
+      circuit_half_open_probes: 1
+      request_allowance: 0
+    # Google Routes, eligible only for validated final operations.
+    #
+    # timeout_ms and cache_ttl are 0, which is neither "no timeout" nor "no caching":
+    # it means read route_request_timeout, route_cache_ttl and
+    # route_scheduled_cache_ttl above. A Google timing therefore keeps exactly one
+    # place to change, and the live path and the new chain cannot drift apart.
+    google_routes:
+      enabled: true
+      timeout_ms: 0
+      cache_results: true
+      cache_ttl: 0
+      data_version: ''
+      circuit_failure_threshold: 3
+      circuit_cooldown_seconds: 300
+      circuit_half_open_probes: 1
+      # Zero permits no calls. Raising this is the deliberate act that lets the new
+      # chain bill anything at all, and it applies in the final purpose only.
+      request_allowance: 0
+quote:
+  currency: USD
+  rate_version: '2026-08-production-v1'
+  long_distance:
+    base_cents: 50000
+    weight_distance_factor: 0.00065
+    dimensional_weight_divisor: 139
+    fallback_weight_lbs:
+      studio: 2500
+      1_br: 4000
+      2_br: 6000
+      3_br: 8500
+      4_br_plus: 12000
+  local_residential:
+    base_cents:
+      studio: 41500
+      1_br: 56900
+      2_br: 90900
+      3_br: 207300
+      4_br_plus: 300000
+      few_items: 29500
+    travel_speed_mph: 30
+    travel_hourly_cents: 11000
+    # Declared float in the schema, so it is shipped as a float. A bare `2` installs
+    # as an integer and every later comparison against the stored value sees a type
+    # change where no value changed.
+    round_trip_multiplier: 2.0
+  fees:
+    stairs_per_flight_cents: 1750
+    passenger_elevator_cents: 3500
+    freight_elevator_cents: 2000
+    long_carry_cents: 7500
+    shuttle_cents: 25000
+    packing_cents: 32500
+    cleaning_cents: 21000
+  commercial:
+    base_cents: 300000
+    distance_threshold_miles: 50
+    excess_distance_cents_per_mile: 200
+    packing_unpacking_cents: 32500
+    it_services_cents: 20000
+    furniture_assembly_cents: 15000
+    after_hours_percent: 20
+    weekend_percent: 15
+  specialty:
+    piano_cents: 42500
+    gun_safe_cents: 27500
+    fine_art_cents: 35000
+    gym_equipment_cents: 22500
+    other_cents: 10000
+  on_demand:
+    van_1_helper_cents: 20000
+    truck_1_helper_cents: 30000
+    truck_2_helpers_cents: 47500
+    rush_cents: 7500
+    expedited_cents: 15000
+    included_miles: 10
+    excess_distance_cents_per_mile: 100
+  # Express Courier. The pinned, self-bookable local service: one driver, one
+  # pickup, one delivery, priced from distance rather than from crew size.
+  #
+  # Every figure is integer cents, and the rate_version above is stamped into each
+  # quote so a stored total can always be read back against the rates that produced
+  # it. Changing any number here means changing rate_version too.
+  courier:
+    base_cents: 1900
+    # Miles the base charge already covers. Beyond this, per-mile pricing starts.
+    included_miles: 5
+    excess_distance_cents_per_mile: 150
+    # Keyed by Delivery Mode machine value. Store Pickup costs more because the
+    # driver queues at a counter and identifies an order rather than taking a
+    # package from someone's hands.
+    mode_surcharge_cents:
+      courier_send: 0
+      courier_receive: 0
+      courier_store_pickup: 500
+    # Optional, and keyed by the urgency machine value the form submits. An
+    # unmapped urgency adds nothing rather than being refused: urgency is an
+    # upsell, not a fact the quote depends on. A tier not listed here is simply
+    # not surcharged.
+    urgency_surcharge_cents:
+      standard: 0
+      rush: 750
+      expedited: 1500
+  diy_truck:
+    daily_base_cents:
+      10_ft: 9900
+      15_ft: 12900
+      20_ft: 15900
+      26_ft: 19900
+    included_miles_per_day: 50
+    excess_mileage_cents_per_mile: 129
+    insurance_cents_per_day: 3500
+    dolly_cents_per_day: 2000
+    pads_cents_per_day: 2500
+    labor_help_minimum_cents: 19000

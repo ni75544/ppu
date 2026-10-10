@@ -30,6 +30,7 @@ abstract class CoordinateRouteProviderBase implements DistanceProviderInterface 
     protected readonly Settings $settings,
     protected readonly TimeInterface $time,
     protected readonly LoggerInterface $logger,
+    protected readonly ?RoutingModeResolver $routingModeResolver = NULL,
   ) {}
 
   /**
@@ -100,6 +101,17 @@ abstract class CoordinateRouteProviderBase implements DistanceProviderInterface 
    * Executes one bounded GET without retaining upstream messages or exceptions.
    */
   protected function request(string $url, array $query, int $timeoutMs): array {
+    // Fail closed in development_fixed mode, at the one socket every coordinate
+    // adapter shares. Mapbox and OSRM route through here; the guard refuses the
+    // network before any request is dispatched, so no scheduling or ordinary
+    // chain can dial out locally even though only the customer facade and the
+    // Google adapter carried a guard before. NOT_CONFIGURED is a classified,
+    // non-billing terminal failure — the same closed code the Google adapter
+    // raises — so a chain treats it as an unusable provider, not a fault.
+    if ($this->routingModeResolver?->isDevelopmentFixed()) {
+      $this->fail(DistanceProviderException::NOT_CONFIGURED);
+    }
+
     try {
       $response = $this->httpClient->request('GET', $url, [
         RequestOptions::QUERY => $query,

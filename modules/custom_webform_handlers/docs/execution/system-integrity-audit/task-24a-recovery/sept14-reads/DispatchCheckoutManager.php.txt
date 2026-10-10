@@ -1,0 +1,819 @@
+[rtk] /!\ No hook installed — run `rtk init -g` for automatic token savings
+1:<?php
+2:
+3:namespace Drupal\custom_webform_handlers\Commerce;
+4:
+5:use Drupal\commerce_order\Entity\OrderInterface;
+6:use Drupal\commerce_payment\Entity\PaymentInterface;
+7:use Drupal\commerce_payment\Plugin\Commerce\PaymentGateway\SupportsAuthorizationsInterface;
+8:use Drupal\commerce_payment\Plugin\Commerce\PaymentGateway\SupportsVoidsInterface;
+9:use Drupal\Component\Datetime\TimeInterface;
+10:use Drupal\Core\Entity\EntityTypeManagerInterface;
+11:use Drupal\custom_webform_handlers\Checkout\CheckoutAttempt;
+12:use Drupal\custom_webform_handlers\Checkout\CheckoutAttemptStore;
+13:use Drupal\custom_webform_handlers\Checkout\CheckoutContact;
+14:use Drupal\custom_webform_handlers\Checkout\CheckoutOutcome;
+15:use Drupal\custom_webform_handlers\Checkout\CheckoutState;
+16:use Drupal\custom_webform_handlers\Checkout\DispatchCheckoutManagerInterface;
+17:use Drupal\custom_webform_handlers\Checkout\PaidDispatchReference;
+18:use Drupal\custom_webform_handlers\Checkout\QuoteSnapshot;
+19:use Drupal\custom_webform_handlers\Dispatch\BookingWorkflow;
+20:use Drupal\custom_webform_handlers\Dispatch\BookingWorkflowGate;
+21:use Drupal\custom_webform_handlers\Dispatch\DispatchOwner;
+22:use Drupal\custom_webform_handlers\Dispatch\DispatchCheckoutPlannerInterface;
+23:use Drupal\custom_webform_handlers\Dispatch\DispatchReason;
+24:use Drupal\custom_webform_handlers\Dispatch\DispatchRequestFactory;
+25:use Drupal\custom_webform_handlers\Dispatch\Hold;
+26:use Drupal\custom_webform_handlers\Dispatch\Notify\DispatchNotification;
+27:use Drupal\custom_webform_handlers\Dispatch\Notify\DispatchNotifierInterface;
+28:use Drupal\custom_webform_handlers\Dispatch\ReservationResult;
+29:use Drupal\custom_webform_handlers\Dispatch\ResourceProfileFactory;
+30:use Drupal\custom_webform_handlers\Dispatch\Slot;
+31:use Drupal\custom_webform_handlers\Dispatch\Storage\ReservationStoreInterface;
+32:use Drupal\custom_webform_handlers\Event\DispatchReservationConfirmedEvent;
+33:use Drupal\custom_webform_handlers\Event\DomainEventEmitter;
+34:use Drupal\custom_webform_handlers\Review\ReviewManagerInterface;
+35:use Drupal\custom_webform_handlers\Review\ReviewState;
+36:use Drupal\webform\WebformSubmissionInterface;
+37:use Psr\Log\LoggerInterface;
+38:
+39:/**
+40: * The one adapter that composes the Dispatch Planner with Commerce.
+41: *
+42: * It decides nothing about capacity, price, or eligibility. The planner still
+43: * derives the Dispatch Window, the Resource Calendar Guard's transaction still
+44: * resolves contention, BookingWorkflowGate still answers whether a Webform may
+45: * use this workflow at all, and QuoteSnapshot can only carry a figure the server
+46: * quoted. What this class owns is the order of those calls, and the undo when a
+47: * later one refuses: a Hold with no order, an order with no attempt, and an
+48: * attempt with no Reservation are each a state a customer must never be left in.
+49: *
+50: * Every return is a CheckoutOutcome, and CheckoutOutcome is the publishable
+51: * shape. Hold expiry, Hold token, owner hash, the internal Dispatch Window, and
+52: * the Reservation identifier are all reachable inside these methods and none of
+53: * them is ever returned or logged into a customer-visible message.
+54: *
+55: * It subscribes to no Commerce event. A checkout pane on the payment step calls
+56: * confirmPaid() synchronously, in the same request that authorized the card, so
+57: * the Hold is still in session and the guard transaction is what decides capacity
+58: * — not a payment transition, and not a return URL. The money is authorized first
+59: * and captured only once that transaction has committed a Reservation, so a Slot
+60: * that cannot be confirmed is never charged for; the one residual gap, a booking
+61: * confirmed whose capture then fails, is held for reconciliation, never released.
+62: */
+63:final class DispatchCheckoutManager implements DispatchCheckoutManagerInterface {
+64:
+65:  public function __construct(
+66:    private readonly DispatchCheckoutPlannerInterface $planner,
+67:    private readonly ReservationStoreInterface $store,
+68:    private readonly DispatchOwner $owner,
+69:    private readonly DispatchRequestFactory $requestFactory,
+70:    private readonly ResourceProfileFactory $profileFactory,
+71:    private readonly BookingWorkflowGate $workflowGate,
+72:    private readonly CheckoutAttemptStore $attempts,
+73:    private readonly DispatchOrderFactory $orderFactory,
+74:    private readonly EntityTypeManagerInterface $entityTypeManager,
+75:    private readonly TimeInterface $time,
+76:    private readonly LoggerInterface $logger,
+77:    private readonly DispatchNotifierInterface $notifier,
+78:    private readonly ReviewManagerInterface $reviews,
+79:    private readonly DomainEventEmitter $events,
+80:  ) {}
+81:
+82:  /**
+83:   * Begins payment for one job at one Slot: gate, Hold, order, attempt.
+84:   *
+85:   * The order of the four is the whole design. The gate is first because a
+86:   * refused Webform must have no effect at all, not an effect that is undone.
+87:   * The Hold is before the order because capacity is the scarce thing and an
+88:   * order for capacity nobody can supply is worse than no order. The attempt row
+89:   * is last because it is what names the other two, and every step after the
+90:   * first knows how to undo the ones before it.
+91:   *
+92:   * @see \Drupal\custom_webform_handlers\Checkout\DispatchCheckoutManagerInterface::start()
+93:   */
+94:  public function start(WebformSubmissionInterface $submission, Slot $slot, CheckoutContact $contact, QuoteSnapshot $quote): CheckoutOutcome {
+95:    $submissionId = (int) $submission->id();
+96:    $webformId = (string) ($submission->getWebform()?->id() ?? '');
+97:    if ($submissionId < 1 || $webformId === '') {
+98:      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+99:    }
+100:
+101:    // Asked here, of the submission's own Webform, and not taken on trust from a
+102:    // caller. Task 2 ships an empty transfer allowlist, so today this is the line
+103:    // that refuses every public checkout — which is the intended state.
+104:    if (!$this->workflowGate->allows($webformId, BookingWorkflow::Dispatch)) {
+105:      return CheckoutOutcome::refused(DispatchReason::NotConfigured);
+106:    }
+107:
+108:    // Only the pickup-arrival instant is taken from the caller. Slot's constructor
+109:    // is public, so a caller could otherwise name a Resource or a zone of its own
+110:    // choosing, and capacity would be claimed against whichever van it named.
+111:    $resolved = $this->slotFor($webformId, $slot->startTimestamp);
+112:    if ($resolved === NULL) {
+113:      return CheckoutOutcome::refused(DispatchReason::NotConfigured);
+114:    }
+115:
+116:    $request = $this->requestFactory->fromSubmission($submission);
+117:    if ($request === NULL) {
+118:      // The saved submission no longer normalises into a job. Refused before any
+119:      // Hold, because a Hold for a job the planner cannot describe is capacity
+120:      // spent on nothing.
+121:      return CheckoutOutcome::refused(DispatchReason::IncompleteFacts);
+122:    }
+123:
+124:    $repeat = $this->existingAttempt($submissionId, $resolved, $quote);
+125:    if ($repeat !== NULL) {
+126:      return $repeat;
+127:    }
+128:
+129:    $held = $this->planner->createCheckoutHold($request, $resolved, $quote);
+130:    if (!$held->isHeld() || $held->hold === NULL) {
+131:      // The planner's own refusal, passed through unchanged. It has already
+132:      // decided grid alignment, working hours, repositioning, and contention, and
+133:      // a second opinion here would be a second scheduling authority.
+134:      return CheckoutOutcome::refused($held->reason);
+135:    }
+136:
+137:    $order = $this->orderFactory->create($submission, $resolved, $contact, $quote);
+138:    if ($order === NULL) {
+139:      $this->releaseHold($held->hold);
+140:      return CheckoutOutcome::refused(DispatchReason::NotConfigured);
+141:    }
+142:
+143:    return $this->recordAttempt($order, $submissionId, $resolved, $quote, $held->hold);
+144:  }
+145:
+146:  /**
+147:   * Turns one paid order into one Reservation, once, synchronously.
+148:   *
+149:   * Idempotent by reading the attempt's own state first and by settling with a
+150:   * conditional update rather than a read-then-write: a payment notification that
+151:   * arrives twice confirms once and is told success both times. The gate is
+152:   * deliberately not consulted again here — a configuration change made between
+153:   * payment and confirmation would otherwise refuse a booking the customer has
+154:   * already been charged for, which is strictly worse than honouring it.
+155:   *
+156:   * @see \Drupal\custom_webform_handlers\Checkout\DispatchCheckoutManagerInterface::confirmPaid()
+157:   */
+158:  public function confirmPaid(PaidDispatchReference $paid): CheckoutOutcome {
+159:    $attempt = $this->attempts->loadByOrder($paid->orderId);
+160:    if ($attempt === NULL || $attempt->submissionId !== $paid->submissionId) {
+161:      // Either this order pays for no dispatch job, or the reference names a
+162:      // different job than the attempt does. Neither is confirmable, and guessing
+163:      // which job was meant would confirm capacity for the wrong one.
+164:      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+165:    }
+166:
+167:    if ($attempt->state->hasReservation()) {
+168:      // Already a Reservation — Paid, or ReconciliationRequired where the booking
+169:      // stands and only its money is unresolved. Either way the capacity question
+170:      // is settled, so the repeat is expected and is answered as success. A second
+171:      // confirmReservation() here would ask the guard to book an already-booked
+172:      // Slot; reading state first is precisely so it is not asked.
+173:      return CheckoutOutcome::confirmed();
+174:    }
+175:
+176:    if (!$attempt->isOpen()) {
+177:      $this->logger->error('Order @order was paid but its checkout attempt is @state, so no Reservation was made.', [
+178:        '@order' => $paid->orderId,
+179:        '@state' => $attempt->state->value,
+180:      ]);
+181:      return CheckoutOutcome::refused(DispatchReason::HoldNotFound);
+182:    }
+183:
+184:    $submission = $this->loadSubmission($attempt->submissionId);
+185:    if ($submission === NULL) {
+186:      $this->logger->error('Order @order was paid but submission @sid no longer exists, so no Reservation was made.', [
+187:        '@order' => $paid->orderId,
+188:        '@sid' => $attempt->submissionId,
+189:      ]);
+190:      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+191:    }
+192:
+193:    return $this->confirmHeld($attempt->orderId, $attempt->slot, $submission);
+194:  }
+195:
+196:  /**
+197:   * Abandons one unpaid attempt, and refuses to touch a paid one.
+198:   *
+199:   * The order matters here too, in the other direction. The Hold is released
+200:   * first and the row is settled second, so a crash between them leaves a lapsing
+201:   * Hold and a pending attempt — recoverable — rather than a free Slot that some
+202:   * row still claims. The Commerce cancel transition is applied last of all,
+203:   * because per the design it decides nothing: capacity was already given back.
+204:   *
+205:   * @see \Drupal\custom_webform_handlers\Checkout\DispatchCheckoutManagerInterface::cancel()
+206:   */
+207:  public function cancel(int $orderId): CheckoutOutcome {
+208:    $attempt = $this->attempts->loadByOrder($orderId);
+209:    if ($attempt === NULL) {
+210:      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+211:    }
+212:
+213:    if ($attempt->state->hasReservation()) {
+214:      // A confirmed attempt is a Reservation — Paid, or ReconciliationRequired where
+215:      // the booking stands and only its money is unresolved — and this method may
+216:      // not release or modify one. Withdrawing confirmed capacity is staff work with
+217:      // its own audited path; a cancel link must not reach it, least of all one
+218:      // still awaiting reconciliation.
+219:      return CheckoutOutcome::refused(DispatchReason::AlreadyBooked);
+220:    }
+221:
+222:    if (!$attempt->isOpen()) {
+223:      // Already cancelled or already failed. Nothing to give back, and saying so
+224:      // as success keeps a repeated cancel from reading as an error.
+225:      return CheckoutOutcome::cancelled();
+226:    }
+227:
+228:    $this->releaseHeldSlot($attempt->slot);
+229:
+230:    if (!$this->attempts->settle($orderId, CheckoutState::Cancelled)) {
+231:      $current = $this->attempts->loadByOrder($orderId);
+232:      if ($current !== NULL && $current->state->hasReservation()) {
+233:        // The Slot was confirmed while this cancel was in flight. The Reservation
+234:        // won, and a confirmed booking is never cancelled into releasing capacity —
+235:        // whether or not its authorization has been captured yet.
+236:        return CheckoutOutcome::refused(DispatchReason::AlreadyBooked);
+237:      }
+238:      return CheckoutOutcome::cancelled();
+239:    }
+240:
+241:    // Nothing has been captured on an unpaid attempt, but the card may have been
+242:    // authorized before the customer abandoned it. Void that authorization so the
+243:    // bank's hold on their money is released rather than left to expire; a no-op
+244:    // when there is nothing authorized.
+245:    $this->voidAuthorization($orderId);
+246:
+247:    $this->orderFactory->cancel($orderId);
+248:
+249:    return CheckoutOutcome::cancelled();
+250:  }
+251:
+252:  /**
+253:   * Answers a repeat of an attempt that already exists, or NULL to carry on.
+254:   *
+255:   * Two indexed lookups, before the planner is asked anything. Without them a
+256:   * double-clicked pay button would ask the guard for a Slot this very session is
+257:   * already holding, be refused because it is taken, and tell the customer their
+258:   * own Hold was unavailable — a refusal that is both wrong and unactionable.
+259:   *
+260:   * The unique indexes stay as the backstop for a genuine race; this is the cheap
+261:   * answer for the common case.
+262:   */
+263:  private function existingAttempt(int $submissionId, Slot $slot, QuoteSnapshot $quote): ?CheckoutOutcome {
+264:    $sameIntent = $this->attempts->loadByIntent($submissionId, $slot, $quote);
+265:    if ($sameIntent !== NULL) {
+266:      if ($sameIntent->state->hasReservation()) {
+267:        // Already booked for this exact intent — Paid, or ReconciliationRequired
+268:        // where the Reservation stands and only its capture is unresolved. Either
+269:        // way the job is booked and a second Hold must not be taken for it.
+270:        return CheckoutOutcome::refused(DispatchReason::AlreadyBooked);
+271:      }
+272:      if ($sameIntent->isOpen()) {
+273:        // The same job, arrival, and price as an attempt already in flight. The
+274:        // order that already exists is the answer, not a second one.
+275:        return CheckoutOutcome::started($sameIntent->orderId);
+276:      }
+277:    }
+278:
+279:    if ($this->attempts->openForSubmission($submissionId) !== NULL) {
+280:      // A different arrival or a different price for the same job, with payment
+281:      // already open. One job pays for one arrival at a time; the visitor cancels
+282:      // the first to choose another, which is what cancel() is for.
+283:      return CheckoutOutcome::refused(DispatchReason::AlreadyBooked);
+284:    }
+285:
+286:    return NULL;
+287:  }
+288:
+289:  /**
+290:   * Writes the lifecycle row, and undoes the order and Hold if it cannot.
+291:   *
+292:   * The unique index can still answer with somebody else's row, which is the true
+293:   * race the pre-flight lookups cannot close. When it does, ours is the duplicate:
+294:   * the draft order is deleted, the Hold this request took is given back, and the
+295:   * customer is sent to the order that won. Releasing our own token cannot strip
+296:   * the winner's Hold, because every claim inserts its own row with its own token.
+297:   */
+298:  private function recordAttempt(OrderInterface $order, int $submissionId, Slot $slot, QuoteSnapshot $quote, Hold $hold): CheckoutOutcome {
+299:    $orderId = (int) $order->id();
+300:    $attempt = $this->attempts->open(
+301:      CheckoutAttempt::opening($orderId, $submissionId, $slot, $quote, $this->time->getRequestTime()),
+302:    );
+303:
+304:    if ($attempt === NULL) {
+305:      // No row, so there is no lifecycle. An order left behind here would look
+306:      // payable and could never be confirmed, so it does not survive this method.
+307:      $this->orderFactory->discard($order);
+308:      $this->releaseHold($hold);
+309:      $this->logger->error('A dispatch checkout attempt could not be recorded for order @order; the order and Hold were withdrawn.', [
+310:        '@order' => $orderId,
+311:      ]);
+312:      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+313:    }
+314:
+315:    if ($attempt->orderId !== $orderId) {
+316:      $this->orderFactory->discard($order);
+317:      $this->releaseHold($hold);
+318:      return CheckoutOutcome::started($attempt->orderId);
+319:    }
+320:
+321:    return CheckoutOutcome::started($orderId);
+322:  }
+323:
+324:  /**
+325:   * Confirms this session's Hold on a Slot and records the Reservation on it.
+326:   *
+327:   * The raw Hold token is recovered from the session receipt rather than stored on
+328:   * the attempt row: the store keeps only hashes, and a lifecycle row holding a
+329:   * usable token would be a second copy of a credential. Payment confirmation is
+330:   * synchronous and in-session, so the receipt is there to be read — the same way
+331:   * DispatchBooking reaches a Hold it did not create the request for.
+332:   *
+333:   * The receipt is not forgotten here. DispatchPlanner::confirmFor() consumes it
+334:   * itself once the store returns a Reservation, and a second forget would be this
+335:   * class taking over ownership of a decision the planner already makes.
+336:   */
+337:  private function confirmHeld(int $orderId, Slot $slot, WebformSubmissionInterface $submission): CheckoutOutcome {
+338:    $hold = $this->owner->heldSlot($slot);
+339:    if ($hold === NULL) {
+340:      // Authorized, but this session holds no receipt for the Slot — a new session,
+341:      // a cleared cookie. The Hold cannot be proved to release it, so it lapses on
+342:      // its own; the authorization, though, is on the order and is voided so no
+343:      // money is taken for a booking that cannot be made. The attempt is failed —
+344:      // unless a concurrent confirmation for this order already settled it, in which
+345:      // case that Reservation is the customer's and the honest answer is success,
+346:      // with nothing here to void.
+347:      if (!$this->settleUnpaid($orderId, CheckoutState::Failed)) {
+348:        $current = $this->attempts->loadByOrder($orderId);
+349:        if ($current !== NULL && $current->state->hasReservation()) {
+350:          return CheckoutOutcome::confirmed();
+351:        }
+352:        return CheckoutOutcome::refused(DispatchReason::HoldNotFound);
+353:      }
+354:
+355:      $this->voidAuthorization($orderId);
+356:      $this->logger->warning('Order @order was authorized but this session holds no receipt for its Slot, so the authorization was voided and no Reservation was made.', [
+357:        '@order' => $orderId,
+358:      ]);
+359:      return CheckoutOutcome::refused(DispatchReason::HoldNotFound);
+360:    }
+361:
+362:    $result = $this->planner->confirmCheckoutReservation($hold, $submission);
+363:    if (!$result->isConfirmed() || $result->reservationId === NULL) {
+364:      // Give the Hold back first: whatever becomes of the money, the capacity this
+365:      // request took returns to the calendar. release() is ownership-checked and
+366:      // no-ops on a Hold a concurrent winner has already consumed into a Reservation.
+367:      $this->releaseHold($hold);
+368:
+369:      if (!$this->settleUnpaid($orderId, CheckoutState::Failed)) {
+370:        // No longer pending: a concurrent confirmation for this same order won the
+371:        // race between confirmPaid() reading it open and here. If it left a
+372:        // Reservation, that booking is the customer's — answer with the truth and do
+373:        // not void the authorization it captured.
+374:        $current = $this->attempts->loadByOrder($orderId);
+375:        if ($current !== NULL && $current->state->hasReservation()) {
+376:          return CheckoutOutcome::confirmed();
+377:        }
+378:        return CheckoutOutcome::refused($result->reason);
+379:      }
+380:
+381:      // This refusal is ours to own. Under authorize-first no money has moved — the
+382:      // card is only authorized — so the authorization is voided and the customer is
+383:      // told plainly: not booked, not charged. The reason is the planner's, unaltered.
+384:      $this->voidAuthorization($orderId);
+385:      $this->logger->warning('Order @order was authorized but its Slot could not be confirmed, so the authorization was voided: @reason.', [
+386:        '@order' => $orderId,
+387:        '@reason' => $result->reason->value,
+388:      ]);
+389:      return CheckoutOutcome::refused($result->reason);
+390:    }
+391:
+392:    return $this->settlePaid($orderId, $result, $submission);
+393:  }
+394:
+395:  /**
+396:   * Captures the money, settles the attempt, and never releases the Reservation.
+397:   *
+398:   * Reached only once the guard transaction has committed, so the Reservation
+399:   * already exists and the answer is confirmed no matter what follows. Capture is
+400:   * attempted first and the attempt settles to Paid on success, or to
+401:   * ReconciliationRequired when the gateway could not take the money — the booking
+402:   * is kept either way, because a confirmed Reservation is never given back for a
+403:   * payment reason. Every write below is a record or a notice, none of them a
+404:   * decision, so each failure is logged and none is published.
+405:   */
+406:  private function settlePaid(int $orderId, ReservationResult $result, WebformSubmissionInterface $submission): CheckoutOutcome {
+407:    $reservationId = (int) $result->reservationId;
+408:
+409:    // Capture before settling, so the state the attempt lands in records what
+410:    // actually happened to the money. The guard transaction has already committed:
+411:    // the Reservation exists and nothing here can release it. The only open question
+412:    // is whether the authorization captured.
+413:    $captured = $this->captureAuthorization($orderId);
+414:    $state = $captured ? CheckoutState::Paid : CheckoutState::ReconciliationRequired;
+415:
+416:    $settled = $this->attempts->settle($orderId, $state, $reservationId);
+417:    if (!$settled) {
+418:      // Not pending any more, ordinarily because a concurrent notification settled
+419:      // it first — the idempotency this is built for. Only a settle to a state that
+420:      // carries no Reservation would be wrong here, and that alone is logged.
+421:      $current = $this->attempts->loadByOrder($orderId);
+422:      if ($current === NULL || !$current->state->hasReservation()) {
+423:        $this->logger->error('Reservation @reservation was confirmed for order @order, but the attempt row did not settle as a confirmed booking.', [
+424:          '@reservation' => $reservationId,
+425:          '@order' => $orderId,
+426:        ]);
+427:      }
+428:    }
+429:
+430:    if (!$captured) {
+431:      // Confirmed but not captured — the one residual money gap in the authorize-
+432:      // then-capture model. The Reservation stands, because a confirmed booking is
+433:      // never released for a payment reason; an operator resolves the authorization
+434:      // on Commerce's own order, retrying the capture or voiding and refunding it.
+435:      // The ReconciliationRequired attempt row is the durable, queryable record.
+436:      $this->logger->error('Order @order is confirmed as Reservation @reservation but its authorization could not be captured; the attempt is held for reconciliation.', [
+437:        '@order' => $orderId,
+438:        '@reservation' => $reservationId,
+439:      ]);
+440:    }
+441:
+442:    if (!$this->store->linkOrder($reservationId, $orderId)) {
+443:      // A pointer, not a decision. The Reservation stands without it; what is lost
+444:      // is the Dispatch board's ability to name the order, so it is a warning.
+445:      $this->logger->warning('Reservation @reservation could not be linked to order @order.', [
+446:        '@reservation' => $reservationId,
+447:        '@order' => $orderId,
+448:      ]);
+449:    }
+450:
+451:    $this->recordReviewScheduled($submission, $orderId, $reservationId);
+452:
+453:    // Post-commit, and only on the settle this request actually won, so a replayed
+454:    // or raced confirmation cannot enqueue a second notice. Enqueue-only: a
+455:    // notification failure can never roll back a paid Reservation.
+456:    if ($settled) {
+457:      $this->enqueueConfirmation($result, $submission, $reservationId);
+458:      $this->announceConfirmed($result, $submission, $orderId, $reservationId);
+459:    }
+460:
+461:    return CheckoutOutcome::confirmed();
+462:  }
+463:
+464:  /**
+465:   * Tells the review that its offer was paid for and capacity is committed.
+466:   *
+467:   * The only path to ReviewState::Scheduled, and the reason specification item 2 is
+468:   * an invariant rather than a hope: approval prepares an offer and consumes nothing,
+469:   * and the transition to Scheduled is reachable only from here — after the Resource
+470:   * Calendar Guard's transaction has committed the Reservation this names. Nothing is
+471:   * re-decided; the Reservation already exists and the manager records that it does.
+472:   *
+473:   * A job with no review is the ordinary case. Most dispatch bookings are priced by
+474:   * the quote engine and paid without a member of staff ever seeing them, and those
+475:   * have nothing to record — so NULL here is silence, not a fault.
+476:   *
+477:   * Every failure is logged and none is published, on the same principle as the rest
+478:   * of settlePaid(): the booking is confirmed and paid, and no bookkeeping failure
+479:   * after that point may be turned into a customer-facing refusal or be allowed to
+480:   * throw its way back into a checkout that has already taken money. What is lost by
+481:   * a failure here is the request's own state, which an operator can see is wrong on
+482:   * the board because the job is paid and the request still reads as approved.
+483:   */
+484:  private function recordReviewScheduled(WebformSubmissionInterface $submission, int $orderId, int $reservationId): void {
+485:    try {
+486:      $review = $this->reviews->loadBySubmission((int) $submission->id());
+487:      if ($review === NULL) {
+488:        return;
+489:      }
+490:
+491:      $outcome = $this->reviews->recordScheduled($review->reviewId, $orderId, $reservationId);
+492:      if ($outcome->ok) {
+493:        return;
+494:      }
+495:
+496:      if ($outcome->request?->state === ReviewState::Scheduled) {
+497:        // Already recorded, ordinarily because a concurrent notification for this
+498:        // same order got here first. That is the idempotency this path is built for
+499:        // and not a condition to report: the request says exactly what it should.
+500:        return;
+501:      }
+502:
+503:      $this->logger->error('Order @order is confirmed as Reservation @reservation but Review Request @review could not be recorded as scheduled: @reason.', [
+504:        '@order' => $orderId,
+505:        '@reservation' => $reservationId,
+506:        '@review' => $review->reviewId,
+507:        '@reason' => $outcome->reason->value,
+508:      ]);
+509:    }
+510:    catch (\Throwable $exception) {
+511:      // Caught rather than propagated, because the money is captured and the Slot is
+512:      // held. The type is logged and the message is not: a storage exception can
+513:      // quote the values it was given, and those include a customer's own facts.
+514:      $this->logger->error('Order @order is confirmed as Reservation @reservation but its Review Request could not be read or recorded: @type.', [
+515:        '@order' => $orderId,
+516:        '@reservation' => $reservationId,
+517:        '@type' => get_class($exception),
+518:      ]);
+519:    }
+520:  }
+521:
+522:  /**
+523:   * Settles an attempt to a terminal unpaid state, reporting whether it won.
+524:   *
+525:   * A thin pass-through to the store's compare-and-set, named so the confirm paths
+526:   * read as intent rather than mechanism. FALSE means the row was no longer pending
+527:   * — the caller re-reads to see whether a concurrent confirmation settled it into a
+528:   * Reservation that must be left alone.
+529:   */
+530:  private function settleUnpaid(int $orderId, CheckoutState $state): bool {
+531:    return $this->attempts->settle($orderId, $state);
+532:  }
+533:
+534:  /**
+535:   * Captures this order's authorization, or FALSE when it could not be captured.
+536:   *
+537:   * Runs only after the guard transaction has committed, so it never holds a row
+538:   * lock across the gateway call. FALSE is not an exception to propagate: the
+539:   * Reservation already exists, and the caller turns a failed capture into a
+540:   * reconciliation fact rather than a torn-down booking — so every failure mode, a
+541:   * declined capture or an unreachable gateway alike, is caught and reported as
+542:   * "not captured". Nothing but a payment the gateway still holds in authorization
+543:   * is touched, and the gateway's own guard is honoured before the call.
+544:   */
+545:  private function captureAuthorization(int $orderId): bool {
+546:    $payment = $this->loadAuthorizationPayment($orderId);
+547:    if ($payment === NULL) {
+548:      return FALSE;
+549:    }
+550:
+551:    try {
+552:      $plugin = $payment->getPaymentGateway()?->getPlugin();
+553:      if (!$plugin instanceof SupportsAuthorizationsInterface || !$plugin->canCapturePayment($payment)) {
+554:        return FALSE;
+555:      }
+556:      $plugin->capturePayment($payment);
+557:    }
+558:    catch (\Throwable $e) {
+559:      $this->logger->error('The authorization for order @order could not be captured: @message', [
+560:        '@order' => $orderId,
+561:        '@message' => $e->getMessage(),
+562:      ]);
+563:      return FALSE;
+564:    }
+565:
+566:    return TRUE;
+567:  }
+568:
+569:  /**
+570:   * Voids this order's outstanding authorization, if it has one.
+571:   *
+572:   * Best effort and silent by design: a no-op when nothing is authorized — a
+573:   * declined card left no payment, or a prior capture already completed it — and a
+574:   * swallow of every failure, because this runs on the refusal and cancel paths
+575:   * where there is nothing left to roll back and a throw would only bury the
+576:   * refusal the caller is returning. The gateway's own guard is honoured before the
+577:   * call, so a payment past its authorization state is left untouched.
+578:   */
+579:  private function voidAuthorization(int $orderId): void {
+580:    $payment = $this->loadAuthorizationPayment($orderId);
+581:    if ($payment === NULL) {
+582:      return;
+583:    }
+584:
+585:    try {
+586:      $plugin = $payment->getPaymentGateway()?->getPlugin();
+587:      if (!$plugin instanceof SupportsVoidsInterface || !$plugin->canVoidPayment($payment)) {
+588:        return;
+589:      }
+590:      $plugin->voidPayment($payment);
+591:    }
+592:    catch (\Throwable $e) {
+593:      $this->logger->warning('The authorization for order @order could not be voided: @message', [
+594:        '@order' => $orderId,
+595:        '@message' => $e->getMessage(),
+596:      ]);
+597:    }
+598:  }
+599:
+600:  /**
+601:   * Loads the one payment this order holds in the gateway's authorization state.
+602:   *
+603:   * There is at most one: a dispatch order authorizes a single card once, on the
+604:   * payment step. NULL means none is outstanding — nothing to capture and nothing
+605:   * to void — which both callers treat as their no-op, not as an error. Storage
+606:   * being unavailable is logged and answered as NULL for the same reason capture
+607:   * and void swallow their failures: a money-plumbing fault must not surface as a
+608:   * fatal over a Reservation that already exists.
+609:   */
+610:  private function loadAuthorizationPayment(int $orderId): ?PaymentInterface {
+611:    if ($orderId < 1) {
+612:      return NULL;
+613:    }
+614:
+615:    try {
+616:      $order = $this->entityTypeManager->getStorage('commerce_order')->load($orderId);
+617:      if (!$order instanceof OrderInterface) {
+618:        return NULL;
+619:      }
+620:
+621:      /** @var \Drupal\commerce_payment\PaymentStorageInterface $payments */
+622:      $payments = $this->entityTypeManager->getStorage('commerce_payment');
+623:      $loaded = $payments->loadMultipleByOrder($order);
+624:    }
+625:    catch (\Exception $e) {
+626:      $this->logger->error('Payment storage was unavailable while resolving the authorization for order @order: @message', [
+627:        '@order' => $orderId,
+628:        '@message' => $e->getMessage(),
+629:      ]);
+630:      return NULL;
+631:    }
+632:
+633:    foreach ($loaded as $payment) {
+634:      if ($payment->getState()->getId() === 'authorization') {
+635:        return $payment;
+636:      }
+637:    }
+638:
+639:    return NULL;
+640:  }
+641:
+642:  /**
+643:   * Enqueues the confirmed-booking notice, after commit, or stays silent.
+644:   *
+645:   * A confirmed visitor result carries a full Dispatch Window; if any part of it is
+646:   * absent this enqueues nothing rather than promise a pickup it cannot state. The
+647:   * Reservation is unaffected either way — a notice is never a precondition for a
+648:   * booking — and the notifier neither sends nor throws here: it only puts a record
+649:   * on a queue for a worker to deliver once the request is over. actorUid is NULL
+650:   * because a paying customer, not a staff member, is who confirmed this.
+651:   */
+652:  private function enqueueConfirmation(ReservationResult $result, WebformSubmissionInterface $submission, int $reservationId): void {
+653:    $slot = $result->slot;
+654:    if ($slot === NULL || $result->windowStart === NULL || $result->windowEnd === NULL || $reservationId < 1) {
+655:      return;
+656:    }
+657:
+658:    $this->notifier->notify(DispatchNotification::confirmed(
+659:      $slot->resourceId,
+660:      $slot->timezone,
+661:      $this->time->getRequestTime(),
+662:      $reservationId,
+663:      (int) $submission->id(),
+664:      $slot->webformId,
+665:      $slot->startTimestamp,
+666:      $result->windowStart,
+667:      $result->windowEnd,
+668:      NULL,
+669:    ));
+670:  }
+671:
+672:  /**
+673:   * Announces the committed Reservation so a background reaction can warm its route.
+674:   *
+675:   * A sibling to enqueueConfirmation, on the same seam and for the same reason: the
+676:   * Resource Calendar Guard's transaction has already resolved, so the Reservation
+677:   * this names exists and a listener cannot unmake it. It carries the Resource and the
+678:   * day, never an address — the day resolved in the Resource's own timezone, because
+679:   * "which local day" is a question that Resource's calendar answers and a listener
+680:   * given a bare timestamp would have to guess.
+681:   *
+682:   * Wrapped and swallowed on the same principle the rest of settlePaid() follows:
+683:   * every write after the capture is a record or a notice, none of them a decision, so
+684:   * a bad timezone or a failed announcement is logged by class and the paid booking is
+685:   * left exactly as confirmed. A result without a Slot is silence — there is no day to
+686:   * warm and nothing to announce.
+687:   */
+688:  private function announceConfirmed(ReservationResult $result, WebformSubmissionInterface $submission, int $orderId, int $reservationId): void {
+689:    $slot = $result->slot;
+690:    if ($slot === NULL || $reservationId < 1) {
+691:      return;
+692:    }
+693:
+694:    try {
+695:      $localDate = (new \DateTimeImmutable('@' . $slot->startTimestamp))
+696:        ->setTimezone(new \DateTimeZone($slot->timezone))
+697:        ->format('Y-m-d');
+698:
+699:      $this->events->emit(
+700:        new DispatchReservationConfirmedEvent(
+701:          $reservationId,
+702:          $slot->resourceId,
+703:          $orderId,
+704:          (int) $submission->id(),
+705:          $localDate,
+706:        ),
+707:        DispatchReservationConfirmedEvent::EVENT_NAME,
+708:      );
+709:    }
+710:    catch (\Throwable $exception) {
+711:      // The booking is confirmed and paid; an announcement that could not be built or
+712:      // dispatched changes none of that. Logged by class, because the values it choked
+713:      // on are the Resource's, and swallowed, because there is nothing to undo.
+714:      $this->logger->error('The confirmation of Reservation @reservation for order @order could not be announced: @class.', [
+715:        '@reservation' => $reservationId,
+716:        '@order' => $orderId,
+717:        '@class' => get_class($exception),
+718:      ]);
+719:    }
+720:  }
+721:
+722:  /**
+723:   * Gives back a Hold this request took and will not be paying for.
+724:   *
+725:   * Ownership is proved by the store, so a session with no identity cannot release
+726:   * anything — and must not, because a release that skipped ownership would be a
+727:   * way to free somebody else's capacity. The receipt is dropped either way: a
+728:   * receipt for a Hold this request has abandoned would let a later request
+729:   * present a token for capacity it no longer owns.
+730:   */
+731:  private function releaseHold(Hold $hold): void {
+732:    $ownerId = $this->owner->ownerId();
+733:    if ($ownerId !== '') {
+734:      $this->store->release($hold->token, $ownerId);
+735:    }
+736:
+737:    $this->owner->forgetHold($hold->token);
+738:  }
+739:
+740:  /**
+741:   * Releases the Hold this session recorded for a Slot, if it still has one.
+742:   *
+743:   * A cancel arriving without the receipt — a new session, a cleared cookie —
+744:   * releases nothing, and that is the honest outcome: the token cannot be proved,
+745:   * so the Hold lapses on its own schedule instead. Capacity is returned either
+746:   * way, which is why the attempt is settled regardless.
+747:   */
+748:  private function releaseHeldSlot(Slot $slot): void {
+749:    $hold = $this->owner->heldSlot($slot);
+750:    if ($hold !== NULL) {
+751:      $this->releaseHold($hold);
+752:    }
+753:  }
+754:
+755:  /**
+756:   * Rebuilds the Slot a pickup-arrival instant names, or NULL.
+757:   *
+758:   * The Resource and the timezone come from the operating profile, never from the
+759:   * caller, for the reason DispatchBooking gives: the caller names an instant and
+760:   * the server decides whose capacity that instant belongs to. Everything else —
+761:   * grid alignment, working hours, repositioning — is left to the planner, which
+762:   * re-derives it under its own locks.
+763:   */
+764:  private function slotFor(string $webformId, int $pickupArrival): ?Slot {
+765:    if ($pickupArrival < 1) {
+766:      return NULL;
+767:    }
+768:
+769:    $profile = $this->profileFactory->create();
+770:    if ($profile === NULL) {
+771:      return NULL;
+772:    }
+773:
+774:    try {
+775:      return new Slot($webformId, $profile->resourceId, $pickupArrival, $profile->timezone);
+776:    }
+777:    catch (\InvalidArgumentException $e) {
+778:      // Slot refuses to substitute UTC for a zone this server does not recognise,
+779:      // and so does this: an instant read in the wrong zone passes every check and
+780:      // then puts the driver at the wrong hour.
+781:      $this->logger->error('A dispatch checkout could not build a Slot for Webform @webform: @message', [
+782:        '@webform' => $webformId,
+783:        '@message' => $e->getMessage(),
+784:      ]);
+785:      return NULL;
+786:    }
+787:  }
+788:
+789:  /**
+790:   * Loads the submission one attempt was opened for, or NULL.
+791:   *
+792:   * Read from the identifier the attempt row stores, which was written from the
+793:   * saved submission, so the job confirmed is the job the server recorded — never
+794:   * one a payment notification named.
+795:   */
+796:  private function loadSubmission(int $submissionId): ?WebformSubmissionInterface {
+797:    if ($submissionId < 1) {
+798:      return NULL;
+799:    }
+800:
+801:    try {
+802:      $submission = $this->entityTypeManager
+803:        ->getStorage('webform_submission')
+804:        ->load($submissionId);
+805:    }
+806:    catch (\Exception) {
+807:      // Missing submission storage is a broken installation, not an operator
+808:      // error, and it must not surface as a white screen over a paid order.
+809:      $this->logger->error('Webform submission storage was unavailable, so submission @sid could not be read.', [
+810:        '@sid' => $submissionId,
+811:      ]);
+812:      return NULL;
+813:    }
+814:
+815:    return $submission instanceof WebformSubmissionInterface ? $submission : NULL;
+816:  }
+817:
+818:}

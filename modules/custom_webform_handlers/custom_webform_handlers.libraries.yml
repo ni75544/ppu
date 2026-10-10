@@ -7,7 +7,7 @@
 #
 # Bump the version only when the deployed asset content changes.
 distance_calculator:
-  version: 1.1.15
+  version: 1.1.20
   css:
     component:
       css/distance_calculator.css: {}

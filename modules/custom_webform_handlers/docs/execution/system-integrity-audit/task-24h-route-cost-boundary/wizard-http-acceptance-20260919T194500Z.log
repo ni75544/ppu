@@ -1,0 +1,37 @@
+Task 24H — wizard HTTP/AJAX route-cost acceptance (ppu-qa), captured 20260919T194500Z
+Counters live at capture: t24h_customer_route_calls, t24h_scheduling_leg_calls (QA-gated).
+-----------------------------------------------------------------------------
+== 1. page-1 committed preview (route_preview) ==
+  PASS  preview success (=success)
+  PASS  preview minted a route_reference (=yes)
+  PASS  preview produced an accepted-quote carrier value (=yes)
+  PASS  cold preview adds exactly 1 customer-route calc (=1)
+    customer-route 3->4 ; scheduling-leg 7->7
+== 2. GET page 1, submit page 1 (with both carriers) -> page 2 ==
+  PASS  advanced to page 2 (date field present) (=yes)
+  PASS  page 2 re-renders the route reference populated (=yes)
+  PASS  page 2 re-renders the accepted-quote carrier populated (=yes)
+== 3. dispatch offer for the requested date -> real offerable arrivals ==
+  PASS  offer success (=success)
+  PASS  offer returned at least one arrival (=yes)
+    first offered arrival at=1789992000
+== 4. [PRECONDITION] attempt a real advisory Hold on that arrival ==
+  PRECONDITION BLOCKED (out of Task 24H scope): dispatch hold needs QA schema >= 10046.
+    QA is at 10040; column price_snapshot_version is absent from
+    custom_webform_handlers_dispatch_reservation. Added by update_10046 (Task 24A);
+    default site ppu is at 10046 and has the column. Repair = an update-hook run this
+    directive forbids. This is a stale-QA-database gap, not a route-cost-boundary defect,
+    and the page-2 -> page-3 advance below is independent of it (dispatch Hold is advisory).
+== 5. submit page 2 (date + real arrival + both carriers) -> reach page 3 ==
+  PASS  NO 'route estimate no longer available' warning on advance (=0)
+  PASS  NO 'estimate has been updated, submit again' handshake stall (=0)
+  PASS  actually reached page 3 (page-3-only field present) (=yes)
+  PASS  advancement adds ZERO customer-route calcs (=0)
+    customer-route 4->4 (advance = +0) ; scheduling-leg 7->9 (recorded separately: +2)
+== 6. release the probe's Hold only if one was created (leave QA as found) ==
+    no Hold was created (precondition blocked); nothing to release
+
+== TASK 24H ROUTE-COST ACCEPTANCE (substantive): 13 passed, 0 failed ==
+== customer-route 3 -> 4 (external routing is development_fixed, offline) ; scheduling-leg 7 -> 9 (separate keys, never conflated) ==
+== Hold precondition: BLOCKED — stale QA schema, out of route-cost scope (see step 4) ==
+SCRIPT_EXIT=0

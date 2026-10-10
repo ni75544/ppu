@@ -50,6 +50,12 @@ final readonly class DispatchClaim {
    *   Quoted amount in minor units, when available.
    * @param string|null $priceSnapshotCurrency
    *   Currency of the quoted amount, when available.
+   * @param string|null $priceSnapshotVersion
+   *   Pricing-policy version the quote was computed under, when available.
+   * @param int|null $admissionGeneration
+   *   Booking-admission generation this claim should persist (Task 24C-7A).
+   *   Defaults to NULL, and every current business caller leaves it NULL: this is
+   *   passive write transport, not an enrolment the planner performs.
    */
   public function __construct(
     public Slot $slot,
@@ -65,6 +71,8 @@ final readonly class DispatchClaim {
     public ?string $priceSnapshotId = NULL,
     public ?int $priceSnapshotCents = NULL,
     public ?string $priceSnapshotCurrency = NULL,
+    public ?string $priceSnapshotVersion = NULL,
+    public ?int $admissionGeneration = NULL,
   ) {}
 
   /**

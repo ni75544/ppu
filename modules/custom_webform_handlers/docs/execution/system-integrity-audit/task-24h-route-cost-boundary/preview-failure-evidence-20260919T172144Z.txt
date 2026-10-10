@@ -1,0 +1,116 @@
+=== Task 24H preview-failure evidence 20260919T172144Z (pre-cache-rebuild) ===
+--- QA / (homepage): does it render the hg webform? ---
+data-custom-webform-quote="hg"
+webform-submission-hg
+--- byte sizes ---
+ 43666 modules/custom_webform_handlers/docs/execution/system-integrity-audit/task-24h-route-cost-boundary/.qa-formhg.html
+ 43689 modules/custom_webform_handlers/docs/execution/system-integrity-audit/task-24h-route-cost-boundary/.active-formhg.html
+ 46118 modules/custom_webform_handlers/docs/execution/system-integrity-audit/task-24h-route-cost-boundary/.qa-home.html
+133473 total
+
+=== CONFIRMED ROOT CAUSE (preview broken on QA) ===
+QA / renders the hg webform (same form). /form/hg config identical across hosts
+(same libraries attrs, preview_url, csrf_token_url, preview_debounce_ms=600).
+First failing step: address suggestions endpoint returns [] on QA, real results on active.
+  active '350 5th Ave' -> '350 5th Avenue, New York, NY 10118'; QA -> []
+Cause: custom_webform_handlers.settings:routing.geocoder is NULL on QA,
+  {provider:ppu_nominatim,version:nycmetro-...,persist:true,request_allowance:100000} on active.
+AddressCoordinateResolver::suggest() reads routing.geocoder; null => no self-hosted
+endpoint => [] => no committed address => no route_preview => no estimate.
+This is a QA config gap, NOT a Google/paid-routing issue; Nominatim is self-hosted.
+
+=== FIX (QA-only config, no credentials, no DB clone, no blanket import) ===
+1. set custom_webform_handlers.settings:routing.geocoder on QA to the shipped
+   config/install value {ppu_nominatim, nycmetro-20260904..., persist, 100000}.
+2. created geocoder.geocoder_provider.ppu_nominatim on QA = active's entity
+   (plugin nominatim, rootUrl http://nominatim:8080 — the shared DDEV service,
+   NO credentials; self-hosted, not Google). This was the actual missing piece:
+   watchdog showed 'provider_not_configured' until it existed.
+RESULT: QA suggestions now return real NYC results; a real committed NYC pair
+  ('350 5th Avenue...' -> '30 Rockefeller Plaza...') yields status=success,
+  route_reference minted, quote_status=estimated, 1 provider calc, dist 12mi
+  (the development_fixed FIXTURE — NOT live routing; paid Google stays off).
+
+=== REPRODUCIBILITY GAP (flagged, NOT fixed this pass — no migration authorized) ===
+geocoder.geocoder_provider.ppu_nominatim is 'Only in DB' on BOTH sites — it is not
+captured in config/install, so any fresh install (like QA was) lacks it. routing.geocoder
+IS shipped in config/install but QA's active copy had drifted to null. A durable fix is to
+ship the geocoder_provider in config/install + an update hook; that is a config migration,
+out of this pass's scope. Cleanly cleaning up .qa-*.html scratch dumps.
+
+=== QA BOOKING-PATH STAGE OUTCOMES (post geocoder fix, actual results) ===
+suggestions:            PASS (real NYC results)
+committed addresses:    PASS (pair accepted)
+estimate/reference:     PASS (route_preview -> status=success, route_reference minted, quote=estimated, 1 calc, dist 12mi = development_fixed FIXTURE, not live routing)
+available slot:         PASS (DispatchBooking::offer('hg', courier values, 2026-09-21) -> 18 slots; slot0 at=1789992000 time=08:00; 2026-09-19/20 correctly closed)
+selection/hold:         NOT VERIFIED here (browser-driven; DispatchBooking::hold reachable offline but not exercised this pass)
+advancement/wizard:     NOT VERIFIED (browser-only)
+checkout preparation:   PASS (prior pass: resolveQuote -> snapshot from fact, 0 provider calls, no premature order)
+reservation confirmation: NOT VERIFIED (see item 3)
+
+=== ITEM 3 — payment-success confirmation feasibility (no real payment) ===
+QA payment gateways: 0 (NONE). Did NOT install/enable one (unauthorized).
+confirmPaid(PaidDispatchReference) in DispatchCheckoutManager is PURE server logic
+(store + guard; idempotent: an already-reserved attempt returns confirmed()); it makes
+NO external/gateway call, so it CAN be exercised offline GIVEN a checkout attempt
+(which needs offer->hold->start to create an order). No EXISTING offline probe/test
+exercises it (grep of tests/ = none; PHPUnit not run per policy). Reservation
+CONFIRMATION is the subject of the EXISTING Task 24D (atomic local settlement) and
+Task 24E (payment recovery) specs — separately scoped, NOT part of 24H's route-cost boundary.
+
+=== ITEM 2 — main-site reservation failure: UNRESOLVED, tracked separately ===
+The geocoder gap explains QA's broken preview but NOT any main-site reservation failure
+(active autocomplete already worked). Not reproduced or explained here. Main site read-only.
+Carried forward explicitly as unresolved; NOT fixed.
+
+=== PAGE-2 WIZARD FAILURE — confirmed root cause + fix (2026-09-19) ===
+Wizard pages: page_1 Route&Service {service_type,delivery_mode,origin_address,
+destination_address,calculated_distance_meters,courier_prohibited_ack};
+page_2 Package&Quote {preferred_service_date,dispatch_slot};
+page_3 Contact&Handoff {final_calculated_quote,estimated_quote_status,estimated_quote_breakdown}.
+CONFIRMED CAUSE: the acceptance gate fires on the page_2->page_3 advance (the moment
+dispatch_slot is present). My reference carrier was estimated_quote_breakdown — which
+lives on page_3, AFTER the gate. So the browser can NEVER put the reference where the
+gate reads it; retrieve() got an empty reference -> 'missing_reference' (diag-logged) ->
+'Your saved route estimate is no longer available'. Precise rejection reason: MISSING
+REFERENCE (not unknown/owner/pair/expiry).
+FIX: RouteFactStore.store() now also records an owner-scoped journey-identity ->
+EXACT-reference pointer (REFS_KEY), and referenceForOwnerPair() recovers that exact
+reference when the breakdown carries none. Gate/preSave/checkout use the carried
+reference if present, else the pointer, then retrieve() (which re-validates pair/mode/
+purpose/policy/expiry). Not a fact-by-pair scan: one exact reference per journey,
+replaced on re-preview, dropped when its fact is pruned. Unknown pair (no fact,no
+pointer) still fails closed everywhere.
+ITEM 4 — counter attribution: page-1 +1 = customer route_preview (customer_route_entry_provider).
+page-2 increments = the OFFER's scheduling-leg calcs via DistanceProviderRouteEstimator
+(depot->pickup etc.), a DIFFERENT caller; NOT duplicate customer-route previews. One offer
+measured = +1 scheduling-leg. Date selection/rebuild manufactures no new address-commit.
+VERIFIED: continuity probe 17/17 (incl. reference-less-breakdown-for-known-pair pointer
+recovery = the exact page_2->3 condition; unknown pair refused), persistence probe 9/9
+(real ->save(): valid=estimated+19312, unknown=manual_review, no order/payment; checkout
+prices valid, refuses unknown). HTTP repro: preview success + no warning, but raw-curl
+multistep did NOT cleanly advance page_1 (unmodeled required fields/AJAX) — full-form
+advance remains the human browser pass.
+
+=== CORRECTED CARRIER (owner/pair fallback REMOVED) — 2026-09-19 ===
+The interim owner/pair pointer was WRONG: a second preview for the same owner+pair
+replaced the pointer, so form A submitting without its reference would resolve B.
+REMOVED it (RouteFactStore::referenceForOwnerPair + REFS_KEY + all 3 fallbacks).
+CORRECT carrier: a DEDICATED per-instance hidden element 'custom_route_reference',
+added on EVERY wizard page by alterForm (runtime, no config/migration), populated
+by the successful preview on page 1 (distance_calculator.js setMappedField), persisted
+across steps by validateForm (form_state->set + submission->setElementData) and re-seeded
+each render. Gate reads form_state value; save/checkout read submission data. Recovery is
+bound to THIS submission instance, NEVER owner/address pair. Missing carrier -> refuse
+everywhere (gate refresh-required, save manual_review, checkout NULL), zero calls.
+ITEM 5 — SEPARATE counters: t24h_customer_route_calls (RoutingModeEntryProvider) vs
+t24h_scheduling_leg_calls (DistanceProviderRouteEstimator). Measured distinct: one
+customer preview + one offer = customer=1, scheduling=1.
+VERIFIED: continuity probe 14/14 (refA->A/refB->B exact; two forms same addresses keep
+their own facts; a later fact C cannot change a form carrying refA; missing carrier
+refused). persistence probe 9/9 (real ->save(): valid=estimated+19312, missing-carrier=
+manual_review, no order/payment). HTTP WIZARD REPRO 4/4 (wizard-http-repro.sh): real
+page1->page2->page2-submit; page-1 required fields fixed (total_weight_lbs); reference
+carried in custom_route_reference from page 1; page-2->3 advance shows NO 'no longer
+available' warning; customer-route +0 on advance. Full multi-page browser click-through
+remains the human pass.

@@ -30,6 +30,20 @@ preview_rate_limit: 30
 # text field — spends a request. The window coalesces a burst of those commits.
 # Clamped to 100–5000 ms in the handler, so a bad value cannot disable the delay.
 preview_debounce_ms: 600
+# Customer routing mode. development_fixed serves deterministic recorded routes
+# with no outbound HTTP; live_cached uses the cache-first Google adapter with its
+# one-request-per-committed-pair controls. DDEV forces development_fixed in code
+# (RoutingModeResolver reads the IS_DDEV_PROJECT signal), so this shipped default
+# governs non-DDEV servers, where a settings.php config override may still pin it.
+# No API key or secret is stored here.
+routing_mode: live_cached
+# Booking admission (Task 24C). Per-submission job-exclusivity enforcement.
+# Disabled here and inert: no caller reads it yet. A missing booking_admission key
+# (as on any site that predates this subtree) also means disabled — enforcement is
+# opt-in and never inferred. Setting this to true does not by itself activate
+# anything; caller integration, migration and capacity gates remain separate work.
+booking_admission:
+  enforce: false
 # Multi-provider routing. Task 20G connects ordinary quote consumers to this
 # policy and gives dispatch separate offer and final chains. Provider eligibility,
 # caching, and budgets remain enforced here rather than at individual call sites.

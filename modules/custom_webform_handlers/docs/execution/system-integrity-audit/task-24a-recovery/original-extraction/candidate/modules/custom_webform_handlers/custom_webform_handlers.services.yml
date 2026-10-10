@@ -1,0 +1,807 @@
+services:
+  logger.channel.custom_webform_handlers:
+    parent: logger.channel_base
+    arguments: ['custom_webform_handlers']
+
+  cache.custom_webform_handlers_coordinates:
+    class: Drupal\Core\Cache\CacheBackendInterface
+    tags:
+      - { name: cache.bin }
+    factory: ['@cache_factory', 'get']
+    arguments: [custom_webform_handlers_coordinates]
+
+  cache.custom_webform_handlers_routes:
+    class: Drupal\Core\Cache\CacheBackendInterface
+    tags:
+      - { name: cache.bin }
+    factory: ['@cache_factory', 'get']
+    arguments: [custom_webform_handlers_routes]
+
+  custom_webform_handlers.route_cache:
+    class: Drupal\custom_webform_handlers\Distance\RouteCache
+    arguments:
+      - '@cache.custom_webform_handlers_routes'
+      - '@lock'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.routing_budget_store:
+    class: Drupal\custom_webform_handlers\Distance\Storage\DatabaseRoutingBudgetStore
+    arguments:
+      - '@database'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.routing_budget:
+    class: Drupal\custom_webform_handlers\Distance\RoutingBudget
+    arguments:
+      - '@custom_webform_handlers.routing_budget_store'
+      - '@config.factory'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.provider_circuit:
+    class: Drupal\custom_webform_handlers\Distance\ProviderCircuit
+    arguments:
+      - '@state'
+      - '@lock'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.routing_usage:
+    class: Drupal\custom_webform_handlers\Distance\RoutingUsage
+    arguments:
+      - '@database'
+      - '@config.factory'
+      - '@custom_webform_handlers.routing_budget'
+      - '@custom_webform_handlers.provider_circuit'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.coordinate_cache:
+    class: Drupal\custom_webform_handlers\Distance\CoordinateCache
+    arguments:
+      - '@cache.custom_webform_handlers_coordinates'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.address_coordinate_resolver:
+    class: Drupal\custom_webform_handlers\Distance\AddressCoordinateResolver
+    arguments:
+      - '@entity_type.manager'
+      - '@?plugin.manager.geocoder.provider'
+      - '@config.factory'
+      - '@language_manager'
+      - '@config.typed'
+      - '@?geocoder.http_adapter'
+      - '@?geocoder.throttle'
+      - '@token'
+      - '@custom_webform_handlers.coordinate_cache'
+      - '@custom_webform_handlers.routing_budget'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.google_routes_distance_provider:
+    class: Drupal\custom_webform_handlers\Distance\GoogleRoutesDistanceProvider
+    arguments:
+      - '@http_client'
+      - '@cache.default'
+      - '@config.factory'
+      - '@logger.channel.custom_webform_handlers'
+      - '@datetime.time'
+
+  # The fallback chain owns caching and reserves budget immediately before this
+  # adapter can dispatch. Its internal legacy cache is therefore disabled here.
+  custom_webform_handlers.google_routes_chain_provider:
+    class: Drupal\custom_webform_handlers\Distance\GoogleRoutesDistanceProvider
+    arguments:
+      - '@http_client'
+      - '@cache.default'
+      - '@config.factory'
+      - '@logger.channel.custom_webform_handlers'
+      - '@datetime.time'
+      - false
+
+  # Provider adapters remain private behind purpose-specific chains.
+  custom_webform_handlers.osrm_distance_provider:
+    class: Drupal\custom_webform_handlers\Distance\OsrmDistanceProvider
+    arguments:
+      - '@http_client'
+      - '@custom_webform_handlers.address_coordinate_resolver'
+      - '@config.factory'
+      - '@settings'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.mapbox_distance_provider:
+    class: Drupal\custom_webform_handlers\Distance\MapboxDistanceProvider
+    arguments:
+      - '@http_client'
+      - '@custom_webform_handlers.address_coordinate_resolver'
+      - '@config.factory'
+      - '@settings'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.distance_provider:
+    alias: custom_webform_handlers.distance_provider_chain.ordinary
+
+  # Purpose and provider eligibility are fixed by wiring, never request input.
+  custom_webform_handlers.distance_provider_chain.ordinary:
+    class: Drupal\custom_webform_handlers\Distance\ChainDistanceProvider
+    arguments:
+      - 'ordinary'
+      -
+        osrm: '@custom_webform_handlers.osrm_distance_provider'
+        mapbox: '@custom_webform_handlers.mapbox_distance_provider'
+      - '@config.factory'
+      - '@custom_webform_handlers.address_coordinate_resolver'
+      - '@custom_webform_handlers.route_cache'
+      - '@custom_webform_handlers.provider_circuit'
+      - '@custom_webform_handlers.routing_budget'
+      - '@custom_webform_handlers.routing_usage'
+      - '@request_stack'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.offer_distance_provider:
+    class: Drupal\custom_webform_handlers\Distance\ChainDistanceProvider
+    arguments:
+      - 'offer'
+      -
+        mapbox: '@custom_webform_handlers.mapbox_distance_provider'
+      - '@config.factory'
+      - '@custom_webform_handlers.address_coordinate_resolver'
+      - '@custom_webform_handlers.route_cache'
+      - '@custom_webform_handlers.provider_circuit'
+      - '@custom_webform_handlers.routing_budget'
+      - '@custom_webform_handlers.routing_usage'
+      - '@request_stack'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.final_distance_provider:
+    class: Drupal\custom_webform_handlers\Distance\ChainDistanceProvider
+    arguments:
+      - 'final'
+      -
+        mapbox: '@custom_webform_handlers.mapbox_distance_provider'
+        google_routes: '@custom_webform_handlers.google_routes_chain_provider'
+      - '@config.factory'
+      - '@custom_webform_handlers.address_coordinate_resolver'
+      - '@custom_webform_handlers.route_cache'
+      - '@custom_webform_handlers.provider_circuit'
+      - '@custom_webform_handlers.routing_budget'
+      - '@custom_webform_handlers.routing_usage'
+      - '@request_stack'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+
+  custom_webform_handlers.quote_calculator:
+    class: Drupal\custom_webform_handlers\Quote\QuoteCalculator
+    arguments:
+      - '@config.factory'
+      - '@custom_webform_handlers.booking_profile_resolver'
+
+  custom_webform_handlers.reservation_manager:
+    class: Drupal\custom_webform_handlers\Reservation\DatabaseReservationManager
+    arguments:
+      - '@database'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.reservation_owner:
+    class: Drupal\custom_webform_handlers\Reservation\ReservationOwner
+    arguments:
+      - '@request_stack'
+
+  custom_webform_handlers.reservation_definition_provider:
+    class: Drupal\custom_webform_handlers\Reservation\ReservationDefinitionProvider
+    arguments:
+      - '@entity_type.manager'
+      - '@config.factory'
+      - '@datetime.time'
+
+  custom_webform_handlers.reservation_reconciliation:
+    class: Drupal\custom_webform_handlers\Reservation\ReservationReconciliation
+    arguments:
+      - '@database'
+      - '@custom_webform_handlers.reservation_definition_provider'
+      - '@custom_webform_handlers.reservation_manager'
+
+  # Dispatch storage. The guard is the contention authority: it row-locks the
+  # Resource Calendar Guards that serialize planner mutations, and the store is
+  # the only class that issues dispatch SQL. Neither replaces the older
+  # reservation services above, which continue to serve the existing fixed-slot
+  # workflow untouched.
+  custom_webform_handlers.dispatch_calendar_guard:
+    class: Drupal\custom_webform_handlers\Dispatch\Storage\ResourceCalendarGuard
+    arguments:
+      - '@database'
+      - '@datetime.time'
+
+  custom_webform_handlers.dispatch_reservation_store:
+    class: Drupal\custom_webform_handlers\Dispatch\Storage\DatabaseReservationStore
+    arguments:
+      - '@database'
+      - '@datetime.time'
+      - '@custom_webform_handlers.dispatch_calendar_guard'
+      - '@logger.channel.custom_webform_handlers'
+
+  # Which rules apply to the service the visitor picked. This is the only seam a
+  # caller needs: resolve() returns one immutable BookingProfile, so the
+  # eligibility policy, the request factory, the quote calculator and the Webform
+  # handler have stopped keeping their own copies of "which services are
+  # bookable", "which service is the Courier parent" and "which service is a
+  # one-driver job". Config-backed and read-only; it holds no state.
+  custom_webform_handlers.booking_profile_resolver:
+    class: Drupal\custom_webform_handlers\Dispatch\Profile\ConfigBookingProfileResolver
+    arguments:
+      - '@config.factory'
+
+  # Dispatch planning policy. Each of these owns one rule the planner must not
+  # hold itself, so opening a service, retiming a job, or changing the calendar is
+  # a change in one class or in configuration.
+  custom_webform_handlers.dispatch_eligibility:
+    class: Drupal\custom_webform_handlers\Dispatch\Policy\ConfigDispatchEligibility
+    arguments:
+      - '@config.factory'
+      - '@custom_webform_handlers.booking_profile_resolver'
+
+  custom_webform_handlers.dispatch_duration_policy:
+    class: Drupal\custom_webform_handlers\Dispatch\Policy\ConfigServiceDurationPolicy
+    arguments:
+      - '@config.factory'
+
+  custom_webform_handlers.dispatch_resource_schedule:
+    class: Drupal\custom_webform_handlers\Dispatch\Schedule\ProfileResourceSchedule
+    arguments:
+      - '@datetime.time'
+
+  # Public offers and warming use only the offer chain. Final checkout/staff
+  # decisions use a distinct instance of the same adapter over the final chain;
+  # the purpose string is trusted container input and participates in prepared
+  # fact validation.
+  custom_webform_handlers.dispatch_offer_route_estimator:
+    class: Drupal\custom_webform_handlers\Dispatch\Route\DistanceProviderRouteEstimator
+    arguments:
+      - '@custom_webform_handlers.offer_distance_provider'
+      - '@config.factory'
+      - '@logger.channel.custom_webform_handlers'
+      - 'offer'
+      - '@datetime.time'
+      - '@custom_webform_handlers.distance_provider'
+
+  custom_webform_handlers.dispatch_final_route_estimator:
+    class: Drupal\custom_webform_handlers\Dispatch\Route\DistanceProviderRouteEstimator
+    arguments:
+      - '@custom_webform_handlers.final_distance_provider'
+      - '@config.factory'
+      - '@logger.channel.custom_webform_handlers'
+      - 'final'
+      - '@datetime.time'
+      - '@custom_webform_handlers.distance_provider'
+
+  # Dispatch identity and fact rebuilding. Both sit between the planner and the
+  # request: the owner decides which session a Hold belongs to, and the request
+  # factory turns stored element values into the operational facts the planner
+  # reasons about. Neither is caller-facing — the planner is the only consumer, so
+  # a controller cannot reach past it to read a token or a neighbour's address.
+  custom_webform_handlers.dispatch_profile_factory:
+    class: Drupal\custom_webform_handlers\Dispatch\ResourceProfileFactory
+    arguments:
+      - '@config.factory'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.dispatch_request_factory:
+    class: Drupal\custom_webform_handlers\Dispatch\DispatchRequestFactory
+    arguments:
+      - '@entity_type.manager'
+      - '@config.factory'
+      - '@custom_webform_handlers.booking_profile_resolver'
+
+  custom_webform_handlers.dispatch_owner:
+    class: Drupal\custom_webform_handlers\Dispatch\DispatchOwner
+    arguments:
+      - '@request_stack'
+
+  # Which of the two public booking workflows may act for a Webform. One service,
+  # consulted by both public controllers and by the route access checker below, so
+  # the fixed-slot workflow and the planner can never both hold capacity for the
+  # same Webform. It reuses the two existing enable predicates rather than
+  # restating them: dispatch_request_factory decides what "dispatch is configured
+  # here" means, and reservation_definition_provider decides what "reservations are
+  # switched on here" means.
+  custom_webform_handlers.booking_workflow_gate:
+    class: Drupal\custom_webform_handlers\Dispatch\BookingWorkflowGate
+    arguments:
+      - '@entity_type.manager'
+      - '@config.factory'
+      - '@custom_webform_handlers.dispatch_request_factory'
+      - '@custom_webform_handlers.reservation_definition_provider'
+
+  # The early guard, on the six booking routes that carry the Webform in the path.
+  # Core ANDs every applicable check, so this only ever narrows a route.
+  custom_webform_handlers.booking_workflow_access_check:
+    class: Drupal\custom_webform_handlers\Dispatch\BookingWorkflowAccessCheck
+    arguments:
+      - '@custom_webform_handlers.booking_workflow_gate'
+    tags:
+      - { name: access_check, applies_to: _custom_webform_handlers_booking_workflow }
+
+  # The planner itself. It holds the sequence and none of the rules.
+  custom_webform_handlers.dispatch_planner:
+    class: Drupal\custom_webform_handlers\Dispatch\DispatchPlanner
+    arguments:
+      - '@custom_webform_handlers.dispatch_eligibility'
+      - '@custom_webform_handlers.dispatch_duration_policy'
+      - '@custom_webform_handlers.dispatch_offer_route_estimator'
+      - '@custom_webform_handlers.dispatch_final_route_estimator'
+      - '@custom_webform_handlers.dispatch_resource_schedule'
+      - '@custom_webform_handlers.dispatch_reservation_store'
+      - '@config.factory'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+      - '@custom_webform_handlers.dispatch_profile_factory'
+      - '@custom_webform_handlers.dispatch_request_factory'
+      - '@custom_webform_handlers.dispatch_owner'
+      - '@custom_webform_handlers.dispatch_hold_window'
+
+  # How long a Hold withholds capacity. Its own service because the planner reads
+  # it when it claims and the booking endpoints read it when they renew, and the
+  # two must not be able to disagree after a configuration change.
+  custom_webform_handlers.dispatch_hold_window:
+    class: Drupal\custom_webform_handlers\Dispatch\DispatchHoldWindow
+    arguments:
+      - '@config.factory'
+
+  # The booking operations a request handler may perform. This is the only place
+  # the planner and the storage seam are composed: the planner has no renew or
+  # release, and the store is not caller-facing, so neither can serve a controller
+  # directly. Nothing here accepts or returns a hold token.
+  #
+  # Eligibility is injected as well as being used inside the planner. The planner
+  # returns no Slots both for a fully-booked day and for a job that needs staff, and
+  # only one of those is worth trying another date for, so this seam asks the same
+  # policy directly to tell the two apart.
+  custom_webform_handlers.dispatch_booking:
+    class: Drupal\custom_webform_handlers\Dispatch\DispatchBooking
+    arguments:
+      - '@custom_webform_handlers.dispatch_planner'
+      - '@custom_webform_handlers.dispatch_reservation_store'
+      - '@custom_webform_handlers.dispatch_owner'
+      - '@custom_webform_handlers.dispatch_request_factory'
+      - '@custom_webform_handlers.dispatch_profile_factory'
+      - '@custom_webform_handlers.dispatch_hold_window'
+      - '@custom_webform_handlers.dispatch_eligibility'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  # The read seam an administrative board is assembled through. It is deliberately
+  # not wired to the planner, the calendar guard, or the hold window: it answers
+  # what is already on the calendar and must have no way to change it. It reaches
+  # the store only through that store's administrator-safe projections, so no
+  # secret hash and no other customer's address can travel this far.
+  #
+  # The two integration read models are injected on their interfaces and only here.
+  # Both are histories the board displays beside the schedule; neither is consulted
+  # when the timeline is built, which is what keeps a reported status and a sent
+  # message from ever becoming a second answer about capacity.
+  custom_webform_handlers.dispatch_board_reader:
+    class: Drupal\custom_webform_handlers\Dispatch\DispatchBoardReader
+    arguments:
+      - '@custom_webform_handlers.dispatch_reservation_store'
+      - '@custom_webform_handlers.dispatch_profile_factory'
+      - '@custom_webform_handlers.dispatch_request_factory'
+      - '@entity_type.manager'
+      - '@datetime.time'
+      - '@custom_webform_handlers.dispatch_resource_status_store'
+      - '@custom_webform_handlers.dispatch_notification_log'
+      - '@logger.channel.custom_webform_handlers'
+      # Last, and read-only. The board's Manual Review queue is this service's open
+      # queue, not a scan of submissions, so the row an operator works from and the
+      # row that records their decision are the same row — specification item 6. The
+      # reader only reads it: opening, deciding, and expiring a request all stay with
+      # the manager, so a board can never become a second place a lifecycle is
+      # decided.
+      - '@custom_webform_handlers.review_manager'
+
+  # The staff write seam, and the counterpart to dispatch_booking above: the same
+  # composition rule, for the other audience. Forms hold a route identifier and
+  # whatever somebody typed, so something has to turn that into the Slot and the
+  # submission entity the planner needs, and this is the one place it happens.
+  #
+  # The planner is injected as the staff planner interface rather than as the
+  # concrete class, because that interface is the whole of what staff operations
+  # may do — replan, withhold time, confirm on staff authority. Nothing here can
+  # reach the visitor claim path, and nothing here holds a Hold token: staff
+  # authority is the route permission, not possession of a secret.
+  #
+  # The notifier is given after the planner and the store, which is the order the
+  # work happens in: this seam calls the planner, the planner's transaction commits
+  # and releases its Resource Calendar Guard, and only then does an announcement get
+  # enqueued. It is the notifier that is injected here and not the dispatcher or the
+  # mail manager, so no staff operation can reach a mail server at all — a slow or
+  # broken one cannot delay a booking it has no path to.
+  custom_webform_handlers.dispatch_operations:
+    class: Drupal\custom_webform_handlers\Dispatch\DispatchOperations
+    arguments:
+      - '@custom_webform_handlers.dispatch_staff_planner'
+      - '@custom_webform_handlers.dispatch_reservation_store'
+      - '@custom_webform_handlers.dispatch_profile_factory'
+      - '@entity_type.manager'
+      - '@custom_webform_handlers.dispatch_notifier'
+      - '@current_user'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  # One planner, two audiences. This alias exists so a staff operation depends on
+  # the narrow staff contract and cannot quietly grow into the visitor path, while
+  # both still run the same algorithm on the same rows under the same locks — which
+  # is the property that keeps a job staff book proved exactly as often as one a
+  # customer books.
+  custom_webform_handlers.dispatch_staff_planner:
+    alias: custom_webform_handlers.dispatch_planner
+
+  # Checkout-only final routing seam. Public booking receives the visitor
+  # interface and therefore cannot select the final chain.
+  Drupal\custom_webform_handlers\Dispatch\DispatchCheckoutPlannerInterface: '@custom_webform_handlers.dispatch_planner'
+
+  # Reported Resource Status. Insert-only storage for what staff observed, and wired
+  # to nothing that plans: no planner, no calendar guard, no reservation store. A
+  # report is an observation and must never become a source of capacity, and the
+  # container is where that is made true rather than in a comment on a form.
+  custom_webform_handlers.dispatch_resource_status_store:
+    class: Drupal\custom_webform_handlers\Dispatch\Status\DatabaseResourceStatusStore
+    arguments:
+      - '@database'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  # Notifications, in four services that each do one thing. The split is what keeps a
+  # slow mail server out of a booking: the notifier only enqueues, and everything that
+  # can be slow or fail — composing, sending, recording — happens on cron in the
+  # worker, long after the capacity transaction committed and its locks were released.
+  #
+  # The notifier is the only one of the four a planner-facing seam is given. Nothing on
+  # the write path can reach the mail manager even by accident.
+  custom_webform_handlers.dispatch_notifier:
+    class: Drupal\custom_webform_handlers\Dispatch\Notify\QueueDispatchNotifier
+    arguments:
+      - '@queue'
+      - '@config.factory'
+      - '@logger.channel.custom_webform_handlers'
+      # The last two are what let one announcement choose exactly one queue. The module
+      # handler decides whether Advanced Queue is there to be used, and the entity type
+      # manager loads the queue when it is. Both are core services, so this class still
+      # constructs on a site with no Advanced Queue at all — which is the whole point of
+      # keeping the legacy branch rather than requiring the module.
+      - '@module_handler'
+      - '@entity_type.manager'
+
+  custom_webform_handlers.dispatch_notification_log:
+    class: Drupal\custom_webform_handlers\Dispatch\Notify\DatabaseNotificationLog
+    arguments:
+      - '@database'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  # The claim ledger, and a separate service from the history above it on purpose. The
+  # history answers "what did the system try"; this answers "am I the first to try", and
+  # only the second question has to be right when two workers ask it in the same
+  # instant. So it is one INSERT against a unique index and it is given nothing but the
+  # database and the clock — no config, no logger, nothing it could consult before
+  # answering. A queue job can legitimately be delivered twice, and this is what makes
+  # the second delivery send nothing.
+  custom_webform_handlers.dispatch_notification_claim:
+    class: Drupal\custom_webform_handlers\Dispatch\Notify\DatabaseNotificationClaim
+    arguments:
+      - '@database'
+      - '@datetime.time'
+
+  # The composer is the one notification service that touches a submission, because
+  # resolving a customer's own address is the only reason to open one. It is given the
+  # request factory rather than deciding for itself which Webforms dispatch owns, so
+  # that question keeps exactly one answer in this module.
+  custom_webform_handlers.dispatch_notification_composer:
+    class: Drupal\custom_webform_handlers\Dispatch\Notify\DispatchNotificationComposer
+    arguments:
+      - '@config.factory'
+      - '@entity_type.manager'
+      - '@custom_webform_handlers.dispatch_request_factory'
+      - '@language_manager'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.dispatch_notification_dispatcher:
+    class: Drupal\custom_webform_handlers\Dispatch\Notify\DispatchNotificationDispatcher
+    arguments:
+      - '@custom_webform_handlers.dispatch_notification_composer'
+      - '@plugin.manager.mail'
+      - '@custom_webform_handlers.dispatch_notification_log'
+      - '@custom_webform_handlers.dispatch_notification_claim'
+      - '@logger.channel.custom_webform_handlers'
+
+  # The private Checkout Attempt lifecycle. It is given the database because the
+  # invariants it holds are unique indexes, which no entity field can declare; it is
+  # given nothing else that could turn it into a second opinion about capacity. It
+  # never reads or writes the Dispatch Reservation table.
+  custom_webform_handlers.checkout_attempt_store:
+    class: Drupal\custom_webform_handlers\Checkout\CheckoutAttemptStore
+    arguments:
+      - '@database'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  # Commerce order construction, and nothing else. No planner, no store, no gate,
+  # and no config: it cannot decide eligibility, price, or capacity, and it cannot be
+  # called without a QuoteSnapshot, which only the server's own quote can produce.
+  custom_webform_handlers.dispatch_order_factory:
+    class: Drupal\custom_webform_handlers\Commerce\DispatchOrderFactory
+    arguments:
+      - '@entity_type.manager'
+      - '@commerce_store.current_store'
+      - '@logger.channel.custom_webform_handlers'
+
+  # The one adapter that composes the planner, the storage seam, and Commerce. It is
+  # the second place the planner and the store are composed, and for a different
+  # audience: dispatch_booking serves a request handler that never pays, this serves
+  # payment. The gate is injected because start() must ask it directly rather than
+  # trust that a controller did, and the request and profile factories are injected
+  # for the same reason DispatchBooking has them — the Resource and the timezone come
+  # from the operating profile, never from the caller.
+  #
+  # The notifier is given last, and for the reason dispatch_operations is: it is the
+  # only notification service on this seam, so the confirm path can enqueue a booking
+  # announcement after its transaction commits yet can reach no mail server itself. A
+  # slow or broken one cannot delay, or undo, a Reservation it has no path to.
+  custom_webform_handlers.dispatch_checkout_manager:
+    class: Drupal\custom_webform_handlers\Commerce\DispatchCheckoutManager
+    arguments:
+      - '@Drupal\custom_webform_handlers\Dispatch\DispatchCheckoutPlannerInterface'
+      - '@custom_webform_handlers.dispatch_reservation_store'
+      - '@custom_webform_handlers.dispatch_owner'
+      - '@custom_webform_handlers.dispatch_request_factory'
+      - '@custom_webform_handlers.dispatch_profile_factory'
+      - '@custom_webform_handlers.booking_workflow_gate'
+      - '@custom_webform_handlers.checkout_attempt_store'
+      - '@custom_webform_handlers.dispatch_order_factory'
+      - '@entity_type.manager'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+      - '@custom_webform_handlers.dispatch_notifier'
+      # Last, and only ever told, never asked. When a paid Slot has been confirmed
+      # this reports the Reservation to the review that offered it, which is the only
+      # path to ReviewState::Scheduled. The manager re-decides nothing about capacity;
+      # it records that capacity was committed, which is specification item 2's
+      # "scheduled only when the paid flow confirms a Reservation" expressed as a
+      # dependency rather than as a convention somebody has to remember.
+      - '@custom_webform_handlers.review_manager'
+      # Last of all, and only ever told. When the paid Slot has confirmed, settlePaid()
+      # announces the committed Reservation through this emitter so a background reaction
+      # can warm its route. Post-commit and enqueue-only by the emitter's own contract:
+      # a listener cannot delay, re-decide, or undo the booking it is told about.
+      - '@custom_webform_handlers.domain_event_emitter'
+
+  # The entry seam Step 3 begins at, and the only place a saved submission becomes
+  # a payable order. It composes the derived facts start() needs — the server's own
+  # quote locked into a QuoteSnapshot, the Slot built from the operating profile,
+  # the validated contact email — and registers the resulting order in the cart
+  # session so an anonymous customer keeps access to their own checkout. It decides
+  # no capacity and holds no price of its own: the manager is the authority it hands
+  # those derived facts to. Checkout uses the same Google provider as preview and
+  # preSave; its server cache verifies the unchanged pair without another billed
+  # request.
+  #
+  # Two doors, one authority. start() prices from the server's rate table;
+  # startFromApprovedReview() prices from a Review Request row a staff form wrote,
+  # and takes the entity type manager only to load that row's submission. No review
+  # service appears here: the starter is handed an already-approved value object, so
+  # it can neither approve a request nor read one by tracking code.
+  custom_webform_handlers.dispatch_checkout_starter:
+    class: Drupal\custom_webform_handlers\Checkout\DispatchCheckoutStarter
+    arguments:
+      - '@custom_webform_handlers.dispatch_checkout_manager'
+      - '@custom_webform_handlers.dispatch_request_factory'
+      - '@custom_webform_handlers.dispatch_profile_factory'
+      - '@custom_webform_handlers.quote_calculator'
+      - '@custom_webform_handlers.customer_route_entry_provider'
+      - '@config.factory'
+      - '@commerce_cart.cart_session'
+      - '@entity_type.manager'
+      - '@logger.channel.custom_webform_handlers'
+
+  # Issues and verifies the tracking credential a Review Request's customer holds.
+  #
+  # Given the site private key and nothing else. The stored form is an HMAC keyed by
+  # that key together with the hash salt from settings.php, so both halves of the key
+  # live outside the database and a leaked table yields no working tracking link. It
+  # is a separate service from the manager because it is the only thing that may mint
+  # or match a code, and keeping it separate is what makes that reviewable.
+  custom_webform_handlers.review_credential:
+    class: Drupal\custom_webform_handlers\Review\ReviewCredential
+    arguments:
+      - '@private_key'
+
+  # The only issuer of Review Request SQL.
+  #
+  # Database, clock, logger — and deliberately nothing else. It has no planner and no
+  # reservation store, so no read or write it performs can touch capacity, and it has
+  # no access to the current user, so it cannot decide who may do anything. Every move
+  # it performs is a compare-and-set the manager asked for.
+  custom_webform_handlers.review_request_store:
+    class: Drupal\custom_webform_handlers\Review\ReviewRequestStore
+    arguments:
+      - '@database'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  # The one thing that may move a Review Request.
+  #
+  # Note what is absent: no planner, no Slot service, no reservation store, no order
+  # storage. That is specification item 2 made structural rather than remembered — an
+  # approval cannot spend capacity here because there is no capacity service in this
+  # argument list to spend it with, and the scheduled state is only ever reached by
+  # being handed the Dispatch row the Resource Calendar Guard already committed.
+  #
+  # The current user is injected for one purpose, the audit actor, and the entity type
+  # manager for one purpose, composing the allow-listed service summary the tracker
+  # shows. Translation is injected rather than taken from the container statically
+  # because the customer-facing wording is composed here.
+  #
+  # No reaction rule is given a reference to this service, which is how item 1's "not
+  # in forms or ECA" is enforced: there is no state-setting operation to invoke.
+  custom_webform_handlers.review_manager:
+    class: Drupal\custom_webform_handlers\Review\ReviewManager
+    arguments:
+      - '@custom_webform_handlers.review_request_store'
+      - '@custom_webform_handlers.review_credential'
+      - '@datetime.time'
+      - '@current_user'
+      - '@entity_type.manager'
+      - '@logger.channel.custom_webform_handlers'
+      # Announces a committed transition through the emitter, once decide()'s
+      # compare-and-set has returned. The emitter is post-commit by contract, so a
+      # reaction to a review moving cannot reach back into the decision that moved it.
+      - '@custom_webform_handlers.domain_event_emitter'
+    calls:
+      - [setStringTranslation, ['@string_translation']]
+
+  # Injected on the interface, never on the class, so a caller depends on the twelve
+  # named decisions and not on how they are recorded.
+  Drupal\custom_webform_handlers\Review\ReviewManagerInterface: '@custom_webform_handlers.review_manager'
+
+  # Same reason: callers depend on resolve(), never on where profile data is kept.
+  Drupal\custom_webform_handlers\Dispatch\Profile\BookingProfileResolverInterface: '@custom_webform_handlers.booking_profile_resolver'
+
+  # The reaction layer's two infrastructure services (requirement 4).
+  #
+  # The emitter dispatches a domain event only after the transaction that justifies it
+  # has committed — both callers above it, decide() and settlePaid(), are already past
+  # their commit — so a reaction is always a consequence of an authoritative fact and
+  # never a condition of one. It takes the raw dispatcher, the database (to detect and
+  # defer to any open transaction), and the module logger; a failing listener is logged
+  # by class and the committed fact stands.
+  custom_webform_handlers.domain_event_emitter:
+    class: Drupal\custom_webform_handlers\Event\DomainEventEmitter
+    arguments:
+      - '@event_dispatcher'
+      - '@database'
+      - '@logger.channel.custom_webform_handlers'
+
+  # The narrow seam requirement 4 permits an ECA action to call: it enqueues bounded,
+  # scalar maintenance jobs onto Advanced Queue's SQL-backed durable queue and does
+  # nothing else. It reaches no planner table, Reservation, Checkout Attempt, payment,
+  # or submission; a queued job is never a capacity, payment, or availability authority.
+  # The same seam is used by hook_cron for the nightly popularity recount.
+  custom_webform_handlers.maintenance_queue:
+    class: Drupal\custom_webform_handlers\Maintenance\AdvancedQueueMaintenanceQueue
+    arguments:
+      - '@module_handler'
+      - '@entity_type.manager'
+      - '@logger.channel.custom_webform_handlers'
+
+  # Injected on the interface so the ECA actions depend on "enqueue this work", not on
+  # the fact that Advanced Queue is where it lands.
+  Drupal\custom_webform_handlers\Maintenance\MaintenanceQueueInterface: '@custom_webform_handlers.maintenance_queue'
+
+  # Makes the two customer-facing review pages unstorable.
+  #
+  # No arguments, because it needs nothing: it matches the route name on the response
+  # event and rewrites headers. It is listed here rather than left to the controller
+  # because item 4's no-store is not something a controller can deliver — core's
+  # FinishResponseSubscriber overwrites Cache-Control at priority 0 on its way out, and
+  # this runs at -256 to have the last word. Without this registration the subscriber
+  # is inert and the tracker is served 'no-cache, must-revalidate', which permits a
+  # shared cache to keep a page about one customer's job.
+  custom_webform_handlers.review_tracker_cache:
+    class: Drupal\custom_webform_handlers\EventSubscriber\ReviewTrackerCacheSubscriber
+    tags:
+      - { name: event_subscriber }
+
+  # The durable home of the popularity snapshot: State, plus the invalidator that drops
+  # the read caches derived from it. Given no config and no clock, because it stores
+  # what it is handed and answers one question about what it stored — deciding what a
+  # snapshot means belongs to the snapshot, and deciding whether to use one belongs to
+  # the reader below.
+  custom_webform_handlers.service_popularity_store:
+    class: Drupal\custom_webform_handlers\Ranking\StateServicePopularityStore
+    arguments:
+      - '@state'
+      - '@cache_tags.invalidator'
+
+  # The nightly recompute. It holds a database connection because it is one grouped
+  # query, and the query is the point: the aggregate is produced by the database, so no
+  # row of customer data is ever loaded into PHP to be counted.
+  custom_webform_handlers.service_popularity_aggregator:
+    class: Drupal\custom_webform_handlers\Ranking\ServicePopularityAggregator
+    arguments:
+      - '@database'
+      - '@config.factory'
+      - '@datetime.time'
+      - '@custom_webform_handlers.service_popularity_store'
+      - '@logger.channel.custom_webform_handlers'
+
+  # The reader the form asks. cache.default is the Redis-backed bin the route cache
+  # already uses, and it is deliberately in front of the store rather than instead of
+  # it: losing this cache costs one State read, whereas losing the store would cost a
+  # day of measured ordering. Every failure below it — an unreachable cache, an
+  # unreadable snapshot, too little history — resolves to the order the form passed in.
+  custom_webform_handlers.service_popularity:
+    class: Drupal\custom_webform_handlers\Ranking\CachedServicePopularity
+    arguments:
+      - '@cache.default'
+      - '@custom_webform_handlers.service_popularity_store'
+      - '@config.factory'
+      - '@datetime.time'
+      - '@logger.channel.custom_webform_handlers'
+
+  # Injected on the interface, so the Webform handler depends on "tell me the order"
+  # and not on the fact that the answer is cached. Swapping the implementation for one
+  # that returns its input unchanged is then a one-line change and a complete disabling
+  # of the feature.
+  Drupal\custom_webform_handlers\Ranking\ServicePopularityInterface: '@custom_webform_handlers.service_popularity'
+
+  # Warms the route cache for a day that is already scheduled. Reads the planner's own
+  # private neighbour seam, because warming needs the addresses the availability read
+  # model refuses to carry — and is held to the same rule the planner is: those
+  # addresses form provider requests and are never returned, logged, or stored. The
+  # estimator is the narrow seam, so only duration and distance ever come back.
+  custom_webform_handlers.dispatch_route_warmer:
+    class: Drupal\custom_webform_handlers\Dispatch\Route\ScheduledRouteWarmer
+    arguments:
+      - '@custom_webform_handlers.dispatch_reservation_store'
+      - '@custom_webform_handlers.dispatch_profile_factory'
+      - '@custom_webform_handlers.dispatch_offer_route_estimator'
+      - '@logger.channel.custom_webform_handlers'
+
+  # The one thing a fresh install needs that configuration cannot carry.
+  #
+  # A Commerce Store is a content entity, so config/install ships the order type, the
+  # checkout flow and the Webform and still leaves a new site unable to open an order.
+  # Called once from hook_install(). Registered as a service rather than written inline
+  # in the install file so the store rules sit with the rest of the module's classes and
+  # take Commerce's own currency importer by injection instead of reaching for it.
+  custom_webform_handlers.store_installer:
+    class: Drupal\custom_webform_handlers\Install\CommerceStoreInstaller
+    arguments:
+      - '@entity_type.manager'
+      - '@commerce_price.currency_importer'
+      - '@config.factory'
+      - '@logger.channel.custom_webform_handlers'
+
+  custom_webform_handlers.routing_mode_resolver:
+    class: Drupal\custom_webform_handlers\Distance\RoutingModeResolver
+    arguments:
+      - '@config.factory'
+
+  custom_webform_handlers.fixed_development_route_provider:
+    class: Drupal\custom_webform_handlers\Distance\FixedDevelopmentRouteProvider
+    arguments:
+      - '@datetime.time'
+
+  custom_webform_handlers.customer_route_entry_provider:
+    class: Drupal\custom_webform_handlers\Distance\RoutingModeEntryProvider
+    arguments:
+      - '@custom_webform_handlers.routing_mode_resolver'
+      - '@custom_webform_handlers.google_routes_distance_provider'
+      - '@custom_webform_handlers.fixed_development_route_provider'

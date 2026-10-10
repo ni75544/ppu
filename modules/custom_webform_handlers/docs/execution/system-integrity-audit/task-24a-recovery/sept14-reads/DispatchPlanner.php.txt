@@ -1,0 +1,1554 @@
+[rtk] /!\ No hook installed — run `rtk init -g` for automatic token savings
+1:<?php
+2:
+3:namespace Drupal\custom_webform_handlers\Dispatch;
+4:
+5:use Drupal\Component\Datetime\TimeInterface;
+6:use Drupal\Core\Config\ConfigFactoryInterface;
+7:use Drupal\custom_webform_handlers\Checkout\QuoteSnapshot;
+8:use Drupal\custom_webform_handlers\Dispatch\Policy\DispatchEligibilityInterface;
+9:use Drupal\custom_webform_handlers\Dispatch\Policy\ServiceDurationPolicyInterface;
+10:use Drupal\custom_webform_handlers\Dispatch\Route\DispatchRouteEstimatorInterface;
+11:use Drupal\custom_webform_handlers\Dispatch\Route\PreparedRouteFacts;
+12:use Drupal\custom_webform_handlers\Dispatch\Schedule\ResourceScheduleInterface;
+13:use Drupal\custom_webform_handlers\Dispatch\Storage\DispatchReplan;
+14:use Drupal\custom_webform_handlers\Dispatch\Storage\LockedHold;
+15:use Drupal\custom_webform_handlers\Dispatch\Storage\PlanningNeighbour;
+16:use Drupal\custom_webform_handlers\Dispatch\Storage\ReservationStoreInterface;
+17:use Drupal\webform\WebformSubmissionInterface;
+18:use Psr\Log\LoggerInterface;
+19:
+20:/**
+21: * Plans what one Resource can actually serve on one local date.
+22: *
+23: * The premise this class exists to enforce: a Slot is a pickup-arrival option
+24: * that driver-01-vehicle-01's real schedule can honour, not an hourly preference
+25: * a visitor picks from a list. Every offer returned here has been proved against
+26: * the Resource's working interval, breaks, blackouts, booking horizon, existing
+27: * Dispatch Windows, repositioning space, and — where required — its ability to get
+28: * back to base before the day ends.
+29: *
+30: * Nothing is decided here that belongs elsewhere. Eligibility, on-site durations,
+31: * route legs, and calendar interpretation each sit behind their own seam, so this
+32: * class holds the sequence and none of the rules. It contains no hour, weekday,
+33: * threshold, duration, depot, or buffer literal.
+34: *
+35: * Two properties are worth stating plainly because they shape every decision
+36: * below:
+37: *
+38: * - Unknown is never zero. A missing duration, an unroutable leg, an unreadable
+39: *   day: each removes offers rather than shortening them. The failure mode of this
+40: *   planner is offering nothing, never offering something the driver cannot do.
+41: * - Repositioning between neighbouring jobs is enforced as protected margin, not
+42: *   as a route. The neighbours at claim time are not knowable at offer time, and
+43: *   the storage seam deliberately exposes occupied intervals without addresses, so
+44: *   a margin is the honest instrument. It can decline a sequence that would in
+45: *   fact have worked; it cannot accept one that would not. Depot legs, whose
+46: *   address is known, are routed exactly.
+47: *
+48: * Two audiences, one algorithm. The staff seam is implemented here rather than in
+49: * a controller or a second planner precisely so that a Replan, a staff
+50: * confirmation and a visitor's booking all run the derivation in planFor() and are
+51: * all written by the same storage seam under the same Resource Calendar Guard
+52: * locks. Authority is carried as a PlanAuthority through every private step, and
+53: * it changes exactly one answer: which eligibility assessment is read. Nothing
+54: * physical about a vehicle or a day is relaxed for anybody.
+55: */
+56:final class DispatchPlanner implements DispatchPlannerInterface, DispatchStaffPlannerInterface, DispatchCheckoutPlannerInterface {
+57:
+58:  /**
+59:   * The operating profile.
+60:   */
+61:  const SETTINGS = 'custom_webform_handlers.dispatch';
+62:
+63:  /**
+64:   * How far either side of the working interval occupancy is read, in seconds.
+65:   *
+66:   * A Dispatch Window that began yesterday evening, or repositioning that reaches
+67:   * back before the shift starts, still constrains today. Reading a full day of
+68:   * padding either side costs one wider query and removes a class of collision
+69:   * that a tightly scoped read would not see. It is advisory either way: claim()
+70:   * is the only authority.
+71:   */
+72:  const OCCUPANCY_PAD_SECONDS = 86400;
+73:
+74:  /**
+75:   * Upper bound on grid candidates examined for one date.
+76:   *
+77:   * A guard against a corrupt profile, not a business rule: a 24-hour day on a
+78:   * five-minute grid is 288 candidates, so this cannot truncate a real schedule.
+79:   */
+80:  const MAX_GRID_CANDIDATES = 400;
+81:
+82:  public function __construct(
+83:    private readonly DispatchEligibilityInterface $eligibility,
+84:    private readonly ServiceDurationPolicyInterface $durationPolicy,
+85:    private readonly DispatchRouteEstimatorInterface $offerRouteEstimator,
+86:    private readonly DispatchRouteEstimatorInterface $finalRouteEstimator,
+87:    private readonly ResourceScheduleInterface $schedule,
+88:    private readonly ReservationStoreInterface $store,
+89:    private readonly ConfigFactoryInterface $configFactory,
+90:    private readonly TimeInterface $time,
+91:    private readonly LoggerInterface $logger,
+92:    private readonly ResourceProfileFactory $profileFactory,
+93:    private readonly DispatchRequestFactory $requestFactory,
+94:    private readonly DispatchOwner $owner,
+95:    private readonly DispatchHoldWindow $holdWindow,
+96:  ) {}
+97:
+98:  /**
+99:   * {@inheritdoc}
+100:   */
+101:  public function offerSlots(DispatchRequest $request, string $localDate, ResourceProfile $profile): array {
+102:    // 1. Is this request self-bookable at all, and under which timing rules?
+103:    //
+104:    // Manual Review consumes no capacity, so it yields no Slots rather than Slots
+105:    // a visitor cannot take. The reason stays internal: it is logged, not
+106:    // published, because publishing per-Slot refusals invites a caller to render
+107:    // them as choices and leaks the shape of the Resource's day.
+108:    $outcome = $this->eligibility->assess($request);
+109:    if (!$outcome->selfBookable || $outcome->serviceClass === NULL) {
+110:      $this->logger->debug('Dispatch planning declined for @webform: @reason.', [
+111:        '@webform' => $request->webformId,
+112:        '@reason' => $outcome->reason->value,
+113:      ]);
+114:      return [];
+115:    }
+116:
+117:    // 2. Is the Resource configured well enough to plan against?
+118:    if ($profile->capacity < 1) {
+119:      return [];
+120:    }
+121:    if ($profile->requiresDepotConfiguration()) {
+122:      // Return-to-base with nowhere to return to cannot be evaluated, and a rule
+123:      // that cannot be evaluated must not be skipped.
+124:      $this->logger->warning('Resource @resource requires return to base but has no depot address, so no Slots can be offered.', [
+125:        '@resource' => $profile->resourceId,
+126:      ]);
+127:      return [];
+128:    }
+129:
+130:    // 3. Is this date a working day for this Resource?
+131:    $day = $this->schedule->dayFor($profile, $localDate);
+132:    if ($day === NULL) {
+133:      return [];
+134:    }
+135:
+136:    // 4. Is the day free of unproven legacy claims?
+137:    //
+138:    // A day flagged legacy_unplanned carries an active claim from the older
+139:    // fixed-slot table, which holds no route data. A feasible Dispatch Window
+140:    // cannot be proven around it, so the day stays closed until an administrator
+141:    // reconciles it.
+142:    if ($this->store->legacyUnplannedDates($profile->resourceId, $day->localDate, $day->localDate) !== []) {
+143:      $this->logger->debug('Resource @resource has an unreconciled legacy claim on @date, so no Slots are offered.', [
+144:        '@resource' => $profile->resourceId,
+145:        '@date' => $day->localDate,
+146:      ]);
+147:      return [];
+148:    }
+149:
+150:    // 5. How long is the work at each end?
+151:    $duration = $this->durationPolicy->durationFor($request, $outcome->serviceClass);
+152:    if ($duration === NULL) {
+153:      $this->logger->notice('Dispatch duration undetermined for @webform under class @class, so no Slots are offered.', [
+154:        '@webform' => $request->webformId,
+155:        '@class' => $outcome->serviceClass,
+156:      ]);
+157:      return [];
+158:    }
+159:
+160:    $promiseMinutes = $this->promiseMinutesFor($duration);
+161:    if ($promiseMinutes === NULL) {
+162:      // An arrival promise is part of what an offer states. Inventing a width
+163:      // would put a number in front of a customer that no operator chose.
+164:      $this->logger->error('No pickup arrival promise is configured for this service, so no Slots can be offered.');
+165:      return [];
+166:    }
+167:
+168:    // 6. Route legs. At most three per invocation, memoized below.
+169:    $facts = new PreparedRouteFacts();
+170:    $serviceLeg = $this->routeLeg($facts, $this->offerRouteEstimator, $request->pickupAddress, $request->deliveryAddress, $day->workStart, TRUE);
+171:    if ($serviceLeg === NULL) {
+172:      // Without the pickup-to-delivery leg there is no Dispatch Window to place.
+173:      return [];
+174:    }
+175:
+176:    $depot = trim($profile->depotAddress);
+177:    $depotLeg = NULL;
+178:    if ($depot !== '') {
+179:      $depotLeg = $this->routeLeg($facts, $this->offerRouteEstimator, $depot, $request->pickupAddress, $day->workStart, TRUE);
+180:      if ($depotLeg === NULL) {
+181:        // The first job of the day departs from the depot. Unable to price that
+182:        // leg, the planner cannot prove any candidate is reachable.
+183:        return [];
+184:      }
+185:    }
+186:
+187:    $returnLeg = NULL;
+188:    if ($profile->returnToBase) {
+189:      // Guaranteed non-empty: requiresDepotConfiguration() already refused
+190:      // return-to-base without a depot.
+191:      $returnLeg = $this->routeLeg($facts, $this->offerRouteEstimator, $request->deliveryAddress, $depot, $day->workEnd, TRUE);
+192:      if ($returnLeg === NULL) {
+193:        return [];
+194:      }
+195:    }
+196:
+197:    $occupied = $this->store->occupiedIntervals(
+198:      $profile->resourceId,
+199:      $day->workStart - self::OCCUPANCY_PAD_SECONDS,
+200:      $day->workEnd + self::OCCUPANCY_PAD_SECONDS,
+201:    );
+202:
+203:    // 7. Walk the grid and keep only what the sequence can serve.
+204:    $offers = $this->feasibleOffers(
+205:      $request,
+206:      $profile,
+207:      $day,
+208:      $duration,
+209:      $serviceLeg,
+210:      $depotLeg,
+211:      $returnLeg,
+212:      $occupied,
+213:      $promiseMinutes,
+214:    );
+215:
+216:    usort(
+217:      $offers,
+218:      static fn(SlotOffer $a, SlotOffer $b): int => $a->slot->startTimestamp <=> $b->slot->startTimestamp,
+219:    );
+220:
+221:    return $offers;
+222:  }
+223:
+224:  /**
+225:   * {@inheritdoc}
+226:   */
+227:  public function createHold(DispatchRequest $request, Slot $slot): HoldResult {
+228:    return $this->createHoldFor($request, $slot, PlanAuthority::Visitor, $this->offerRouteEstimator);
+229:  }
+230:
+231:  /**
+232:   * {@inheritdoc}
+233:   */
+234:  public function createCheckoutHold(DispatchRequest $request, Slot $slot, QuoteSnapshot $quote): HoldResult {
+235:    // The accepted quote's four facts are decomposed here, at the checkout-only
+236:    // seam, and handed to the shared algorithm as plain values. The Dispatch layer
+237:    // never holds the Checkout snapshot object — DispatchClaim has always spoken in
+238:    // scalars — so the coupling to Commerce stops at this one method.
+239:    return $this->createHoldFor(
+240:      $request,
+241:      $slot,
+242:      PlanAuthority::Visitor,
+243:      $this->finalRouteEstimator,
+244:      $quote->snapshotId,
+245:      $quote->amountCents,
+246:      $quote->currency,
+247:      $quote->rateVersion,
+248:    );
+249:  }
+250:
+251:  /**
+252:   * Claims one Slot on one authority's behalf.
+253:   *
+254:   * Contention is resolved here, not at offer time. offerSlots() proved this
+255:   * candidate against a margin, because the neighbours were not knowable then;
+256:   * this proves it against the neighbours that actually exist, and hands the
+257:   * exact intervals it derived to the storage seam, which locks the days and
+258:   * decides the race.
+259:   *
+260:   * Shared by the public booking path and by staff confirmation, so work a member
+261:   * of staff books is claimed by the same code, against the same schedule, under
+262:   * the same guard locks as work a visitor books. Everything that is not the
+263:   * eligibility gate applies identically to both, including the requirement for a
+264:   * session to own the Hold: a staff Hold is owned by the operator's own session
+265:   * for the moments it exists, and is released rather than left to lapse if the
+266:   * confirmation that follows it does not complete.
+267:   *
+268:   * The four price-snapshot facts are the one thing that is not shared. Only a
+269:   * checkout has a server-authoritative Commerce quote, so only createCheckoutHold()
+270:   * supplies them; the public and staff callers leave them NULL, because a Hold
+271:   * they take carries no accepted price. They are threaded straight into the
+272:   * store-facing DispatchClaim so the amount, currency, snapshot identity, and
+273:   * pricing-policy version are written atomically with the claim rather than
+274:   * patched onto the Reservation afterwards.
+275:   *
+276:   * @param \Drupal\custom_webform_handlers\Dispatch\DispatchRequest $request
+277:   *   The normalised job.
+278:   * @param \Drupal\custom_webform_handlers\Dispatch\Slot $slot
+279:   *   The pickup-arrival option being claimed.
+280:   * @param \Drupal\custom_webform_handlers\Dispatch\PlanAuthority $authority
+281:   *   Whose eligibility assessment is read; nothing physical is relaxed for either.
+282:   * @param \Drupal\custom_webform_handlers\Dispatch\Route\DispatchRouteEstimatorInterface $estimator
+283:   *   The route estimator the caller's authority is allowed to use.
+284:   * @param string|null $priceSnapshotId
+285:   *   Checkout only: identity of the accepted quote, otherwise NULL.
+286:   * @param int|null $priceSnapshotCents
+287:   *   Checkout only: accepted amount in minor units, otherwise NULL.
+288:   * @param string|null $priceSnapshotCurrency
+289:   *   Checkout only: accepted currency, otherwise NULL.
+290:   * @param string|null $priceSnapshotVersion
+291:   *   Checkout only: pricing-policy version the quote was computed under, else NULL.
+292:   */
+293:  private function createHoldFor(
+294:    DispatchRequest $request,
+295:    Slot $slot,
+296:    PlanAuthority $authority,
+297:    DispatchRouteEstimatorInterface $estimator,
+298:    ?string $priceSnapshotId = NULL,
+299:    ?int $priceSnapshotCents = NULL,
+300:    ?string $priceSnapshotCurrency = NULL,
+301:    ?string $priceSnapshotVersion = NULL,
+302:  ): HoldResult {
+303:    // 1. Does dispatch own this Webform at all?
+304:    //
+305:    // A Webform still running the older fixed-slot workflow is refused here, so
+306:    // the two guards can never both enforce the same submission.
+307:    if (!$this->dispatchOwnsWebform($request->webformId)) {
+308:      return HoldResult::refused(DispatchReason::NotConfigured);
+309:    }
+310:
+311:    // 2. Is there a session to own the Hold?
+312:    //
+313:    // An empty owner means no Hold may be claimed. It is not a reason to claim
+314:    // one that nobody owns, which nothing could later confirm or release.
+315:    $ownerId = $this->owner->ownerId();
+316:    if ($ownerId === '') {
+317:      $this->logger->notice('A Dispatch Hold was requested for @webform without a session to own it; refusing.', [
+318:        '@webform' => $request->webformId,
+319:      ]);
+320:      return HoldResult::refused(DispatchReason::InvalidRequest);
+321:    }
+322:
+323:    $holdSeconds = $this->holdSeconds();
+324:    if ($holdSeconds === NULL) {
+325:      // A Hold with no configured lifetime would be a Hold with a lifetime this
+326:      // class invented. Capacity is held for as long as an operator said, or not
+327:      // at all.
+328:      $this->logger->error('holds.hold_seconds is not configured, so no Dispatch Hold can be claimed.');
+329:      return HoldResult::refused(DispatchReason::NotConfigured);
+330:    }
+331:
+332:    // 3. Normalise the Slot against the Resource it names.
+333:    $normalised = $this->normalisedSlot($slot);
+334:    if ($normalised === NULL) {
+335:      return HoldResult::refused(DispatchReason::InvalidRequest);
+336:    }
+337:    [$slot, $profile] = $normalised;
+338:
+339:    if ($slot->webformId !== $request->webformId) {
+340:      // The Slot was issued for a different form than the one claiming it.
+341:      $this->logger->warning('A Dispatch Hold for @webform presented a Slot issued for @slot_webform; refusing.', [
+342:        '@webform' => $request->webformId,
+343:        '@slot_webform' => $slot->webformId,
+344:      ]);
+345:      return HoldResult::refused(DispatchReason::InvalidRequest);
+346:    }
+347:
+348:    // 4. Derive the plan exactly, against the neighbours that actually exist.
+349:    //
+350:    // Advisory at this point: the guard rows are not held yet, so everything read
+351:    // here can change before the claim is written. It is derived now because the
+352:    // storage seam needs a candidate to know which days to lock.
+353:    $plan = $this->preparePlanFor($request, $slot, $profile, NULL, $authority, $estimator);
+354:    if ($plan instanceof DispatchReason) {
+355:      return HoldResult::refused($plan);
+356:    }
+357:
+358:    // 5. Claim it, re-deriving the same plan while the guard rows are locked.
+359:    //
+360:    // The pre-transaction plan is never claimed on its own authority. Under the
+361:    // locks the neighbours are re-read and every required leg must match a fresh
+362:    // fact prepared above. The claim is written only if the window and protected
+363:    // margins still fit. A competing neighbour absent from that prepared set makes
+364:    // the callback refuse without performing provider I/O.
+365:    $result = $this->store->claimWithRevalidation(
+366:      new DispatchClaim(
+367:        $plan->offer->slot,
+368:        $plan->offer->window,
+369:        $plan->inboundRepositionSeconds,
+370:        $plan->outboundRepositionSeconds,
+371:        $ownerId,
+372:        $holdSeconds,
+373:        $request->pickupAddress,
+374:        $request->deliveryAddress,
+375:        $plan->routeSeconds,
+376:        $plan->routeMeters,
+377:        // NULL on every path but checkout, where createCheckoutHold() supplied the
+378:        // accepted quote. Written with the claim, never patched on afterwards.
+379:        $priceSnapshotId,
+380:        $priceSnapshotCents,
+381:        $priceSnapshotCurrency,
+382:        $priceSnapshotVersion,
+383:      ),
+384:      // Read-only and provider-free: all external facts were prepared before the
+385:      // Resource Calendar Guard was acquired.
+386:      fn(): DispatchReason => $this->replanUnderLock($request, $plan, $profile, NULL, $authority, $estimator),
+387:    );
+388:
+389:    // 6. Keep the receipt in the session that owns it.
+390:    //
+391:    // This is what lets the submission path find its own Hold without the token
+392:    // travelling through a form element, so the token need never be rendered.
+393:    if ($result->hold !== NULL) {
+394:      $this->owner->rememberHold($result->hold->slot, $result->hold->token, $result->hold->expiresAt);
+395:    }
+396:
+397:    return $result;
+398:  }
+399:
+400:  /**
+401:   * {@inheritdoc}
+402:   */
+403:  public function confirmReservation(Hold $hold, WebformSubmissionInterface $submission): ReservationResult {
+404:    return $this->confirmFor($hold, $submission, PlanAuthority::Visitor, $this->offerRouteEstimator);
+405:  }
+406:
+407:  /**
+408:   * {@inheritdoc}
+409:   */
+410:  public function confirmCheckoutReservation(Hold $hold, WebformSubmissionInterface $submission): ReservationResult {
+411:    return $this->confirmFor($hold, $submission, PlanAuthority::Visitor, $this->finalRouteEstimator);
+412:  }
+413:
+414:  /**
+415:   * Confirms a live Hold on one authority's behalf.
+416:   *
+417:   * Liveness is not feasibility. That a Hold is unexpired and owned says only
+418:   * that capacity is still reserved for this session; it says nothing about
+419:   * whether the job the customer finally described still fits there. So the
+420:   * request is rebuilt from what the submission actually stores, feasibility is
+421:   * re-run against it inside the seam's transaction while the days are locked,
+422:   * and the boundaries derived are compared with the boundaries reserved. A
+423:   * changed plan refuses rather than quietly confirming a window that was proved
+424:   * for a different job.
+425:   */
+426:  private function confirmFor(
+427:    Hold $hold,
+428:    WebformSubmissionInterface $submission,
+429:    PlanAuthority $authority,
+430:    DispatchRouteEstimatorInterface $estimator,
+431:  ): ReservationResult {
+432:    $submissionId = (int) $submission->id();
+433:    if ($submissionId < 1) {
+434:      // An unsaved submission has no identity to confirm against, and the seam
+435:      // stores that identity as the link between the job and the capacity.
+436:      $this->logger->warning('A Dispatch confirmation was attempted for an unsaved submission; refusing.');
+437:      return ReservationResult::refused(DispatchReason::InvalidRequest);
+438:    }
+439:
+440:    $token = trim($hold->token);
+441:    if ($token === '') {
+442:      return ReservationResult::refused(DispatchReason::HoldNotFound);
+443:    }
+444:
+445:    // Ownership is proved by the store under its own locks. Reading the identity
+446:    // here only decides whether there is one to present at all.
+447:    $ownerId = $this->owner->ownerId();
+448:    if ($ownerId === '') {
+449:      $this->logger->notice('A Dispatch confirmation was attempted without a session to prove ownership; refusing.');
+450:      return ReservationResult::refused(DispatchReason::HoldNotFound);
+451:    }
+452:
+453:    // Rebuilt from the saved submission, never from the Hold. The Hold reserved
+454:    // capacity for a job described a certain way; only the submission says what
+455:    // the job became. A NULL here also covers the cutover: settingsFor() returns
+456:    // nothing unless this Webform is dispatch-enabled.
+457:    $request = $this->requestFactory->fromSubmission($submission);
+458:    if ($request === NULL || !$this->dispatchOwnsWebform($request->webformId)) {
+459:      $this->logger->warning('Submission @sid could not be rebuilt into a dispatch-owned request, so its Hold was not confirmed.', [
+460:        '@sid' => $submissionId,
+461:      ]);
+462:      return ReservationResult::refused(DispatchReason::NotConfigured);
+463:    }
+464:
+465:    // Read the Hold once without authority, solely to prepare every route fact the
+466:    // locked revalidation may need. The store re-reads it under the guard below;
+467:    // identity and plan comparisons make this advisory read safe to race.
+468:    $preparedHold = $this->store->heldForPlanning($token, $ownerId);
+469:    if ($preparedHold === NULL || $preparedHold->webformId !== $request->webformId) {
+470:      return ReservationResult::refused(DispatchReason::HoldNotFound);
+471:    }
+472:    $normalised = $this->normalisedSlot($preparedHold->slot);
+473:    if ($normalised === NULL) {
+474:      return ReservationResult::refused(DispatchReason::NotConfigured);
+475:    }
+476:    [$preparedSlot, $profile] = $normalised;
+477:    $preparedPlan = $this->preparePlanFor(
+478:      $request,
+479:      $preparedSlot,
+480:      $profile,
+481:      $preparedHold->reservationId,
+482:      $authority,
+483:      $estimator,
+484:    );
+485:    if ($preparedPlan instanceof DispatchReason) {
+486:      return ReservationResult::refused($preparedPlan);
+487:    }
+488:    $preparedReason = $this->planStillHolds(
+489:      $preparedPlan,
+490:      $preparedHold->windowStart,
+491:      $preparedHold->windowEnd,
+492:      $preparedHold->inboundRepositionSeconds,
+493:      $preparedHold->outboundRepositionSeconds,
+494:      $request->webformId,
+495:    );
+496:    if ($preparedReason !== DispatchReason::Available) {
+497:      return ReservationResult::refused($preparedReason);
+498:    }
+499:
+500:    $result = $this->store->confirmWithRevalidation(
+501:      $token,
+502:      $ownerId,
+503:      $submissionId,
+504:      // Read-only and provider-free. A neighbour not represented in the prepared
+505:      // set refuses instead of becoming a network call under the lock.
+506:      fn(LockedHold $locked): DispatchReason => $this->revalidate(
+507:        $locked,
+508:        $preparedHold,
+509:        $preparedPlan,
+510:        $request,
+511:        $authority,
+512:        $estimator,
+513:      ),
+514:    );
+515:
+516:    if ($result->reservationId !== NULL) {
+517:      // The Hold is consumed. Keeping the receipt would let a later submission
+518:      // present a token for a Hold that no longer exists.
+519:      $this->owner->forgetHold($token);
+520:    }
+521:
+522:    return $result;
+523:  }
+524:
+525:  /**
+526:   * {@inheritdoc}
+527:   */
+528:  public function replan(int $dispatchReservationId, Slot $proposed, WebformSubmissionInterface $submission): ReplanResult {
+529:    if ($dispatchReservationId < 1) {
+530:      return ReplanResult::refused(DispatchReason::InvalidRequest);
+531:    }
+532:
+533:    $submissionId = (int) $submission->id();
+534:    if ($submissionId < 1) {
+535:      // Nothing unsaved can own a Reservation, so this is not its submission.
+536:      return ReplanResult::refused(DispatchReason::InvalidRequest);
+537:    }
+538:
+539:    // What is actually there to move, read through the administrator-safe seam.
+540:    // It reports nothing for a lapsed Hold, a released row, or one already
+541:    // superseded: none of those hold capacity, so none of them can be moved.
+542:    $claim = $this->store->adminClaim($dispatchReservationId);
+543:    if ($claim === NULL || !$claim->isConfirmed()) {
+544:      return ReplanResult::refused(DispatchReason::ReservationNotFound);
+545:    }
+546:
+547:    // The submission arrives from the caller, so it is checked against the row
+548:    // rather than believed. A request rebuilt from the wrong submission would
+549:    // derive a perfectly honest window for a different job and write it here.
+550:    if ($claim->submissionId !== $submissionId) {
+551:      $this->logger->warning('A Dispatch Replan of Reservation @id named submission @sid, which is not the one it records; refusing.', [
+552:        '@id' => $dispatchReservationId,
+553:        '@sid' => $submissionId,
+554:      ]);
+555:      return ReplanResult::refused(DispatchReason::InvalidRequest);
+556:    }
+557:
+558:    // Rebuilt from the submission, exactly as confirmation rebuilds it. This is
+559:    // why a board drag is only a proposal: the addresses, service, weight and
+560:    // handling that decide the duration and the route all come from here, and the
+561:    // only thing the caller contributes is a candidate instant.
+562:    $request = $this->requestFactory->fromSubmission($submission);
+563:    if ($request === NULL || !$this->dispatchOwnsWebform($request->webformId)) {
+564:      $this->logger->warning('Reservation @id could not be rebuilt into a dispatch-owned request, so it was not replanned.', [
+565:        '@id' => $dispatchReservationId,
+566:      ]);
+567:      return ReplanResult::refused(DispatchReason::NotConfigured);
+568:    }
+569:
+570:    if ($claim->webformId !== $request->webformId
+571:      || $proposed->webformId !== $request->webformId
+572:      || $proposed->resourceId !== $claim->resourceId) {
+573:      // A move changes when work happens, never which form it came through and
+574:      // never which vehicle does it. Moving work between Resources would mean
+575:      // vacating one calendar and filling another in a single transaction; that is
+576:      // a release and a fresh booking, and the storage seam refuses it too.
+577:      return ReplanResult::refused(DispatchReason::InvalidRequest);
+578:    }
+579:
+580:    $normalised = $this->normalisedSlot($proposed);
+581:    if ($normalised === NULL) {
+582:      return ReplanResult::refused(DispatchReason::InvalidRequest);
+583:    }
+584:    [$slot, $profile] = $normalised;
+585:
+586:    // Derived by the one algorithm, with this Reservation left out of the
+587:    // occupancy read so it cannot conflict with the space it is leaving. Every
+588:    // other live claim, Blackout, break, working hour, horizon rule, predecessor
+589:    // and successor Repositioning leg and return-to-base rule still applies.
+590:    $plan = $this->preparePlanFor($request, $slot, $profile, $dispatchReservationId, PlanAuthority::Staff, $this->finalRouteEstimator);
+591:    if ($plan instanceof DispatchReason) {
+592:      return ReplanResult::refused($plan);
+593:    }
+594:
+595:    // Advisory until the seam locks the old and the new local days together and
+596:    // the closure re-proves this same plan while they are held. What gets written
+597:    // is the Dispatch Window derived here; nothing the caller sent describes one.
+598:    return $this->store->replan(
+599:      new DispatchReplan(
+600:        $dispatchReservationId,
+601:        $submissionId,
+602:        $plan->offer->slot,
+603:        $plan->offer->window,
+604:        $plan->inboundRepositionSeconds,
+605:        $plan->outboundRepositionSeconds,
+606:        $request->pickupAddress,
+607:        $request->deliveryAddress,
+608:        $plan->routeSeconds,
+609:        $plan->routeMeters,
+610:      ),
+611:      // Read-only and provider-free: the final-route facts above are the only
+612:      // route answers this locked callback may consume.
+613:      fn(): DispatchReason => $this->replanUnderLock($request, $plan, $profile, $dispatchReservationId, PlanAuthority::Staff, $this->finalRouteEstimator),
+614:    );
+615:  }
+616:
+617:  /**
+618:   * {@inheritdoc}
+619:   */
+620:  public function scheduleBlackout(
+621:    string $resourceId,
+622:    string $localDate,
+623:    string $startTime,
+624:    string $endTime,
+625:    string $reason,
+626:    ?int $replacesBlackoutId = NULL,
+627:  ): BlackoutResult {
+628:    $profile = $this->profileFactory->createForResource(trim($resourceId));
+629:    if ($profile === NULL) {
+630:      // A Blackout removes time from one Resource's calendar. Without a Profile
+631:      // there is no zone to read the local times in and no working day to check
+632:      // them against, so there is nothing here to write.
+633:      $this->logger->warning('A Dispatch Blackout named a Resource this installation does not operate; refusing.');
+634:      return BlackoutResult::refused(DispatchReason::NotConfigured);
+635:    }
+636:
+637:    try {
+638:      $zone = new \DateTimeZone($profile->timezone);
+639:    }
+640:    catch (\Exception) {
+641:      $this->logger->error('Resource @resource is configured with an unusable timezone, so no Blackout can be scheduled.', [
+642:        '@resource' => $profile->resourceId,
+643:      ]);
+644:      return BlackoutResult::refused(DispatchReason::NotConfigured);
+645:    }
+646:
+647:    $startAt = $this->localInstant($localDate, $startTime, $zone);
+648:    $endAt = $this->localInstant($localDate, $endTime, $zone);
+649:    if ($startAt === NULL || $endAt === NULL || $endAt <= $startAt) {
+650:      // Interval order is settled here rather than left to the store, so an
+651:      // operator who transposed the two times is told so instead of being given a
+652:      // row that closes nothing. A span crossing midnight is refused by
+653:      // construction, because both times are read on the one local date.
+654:      return BlackoutResult::refused(DispatchReason::InvalidRequest);
+655:    }
+656:
+657:    // Working-hours policy, asked of the same calendar seam that decides whether a
+658:    // Slot may be offered at all. NULL covers a malformed date, a date outside the
+659:    // booking horizon, a weekday this Resource does not work, a configured
+660:    // blackout, and a day with no usable interval — and a Blackout over hours
+661:    // nobody works removes nothing while making the board claim it did.
+662:    $day = $this->schedule->dayFor($profile, $localDate);
+663:    if ($day === NULL) {
+664:      return BlackoutResult::refused(DispatchReason::OutsideWorkingHours);
+665:    }
+666:
+667:    // Overlap, not containment. An operator closing a whole day may well give
+668:    // times wider than the working interval, and that closure is meaningful; a
+669:    // span lying entirely before the first or after the last working instant is
+670:    // not, so it is refused rather than stored as a closure of nothing.
+671:    if ($startAt >= $day->workEnd || $endAt <= $day->workStart) {
+672:      return BlackoutResult::refused(DispatchReason::OutsideWorkingHours);
+673:    }
+674:
+675:    // Schedule impact is decided by the store, under the Resource Calendar Guard
+676:    // rows for every local day the span touches, because deciding it here would
+677:    // mean reading occupancy that nothing is holding still. A span over live work
+678:    // is refused naming the claims in the way, never written over them.
+679:    return $this->store->scheduleBlackoutGuarded(
+680:      $profile->resourceId,
+681:      $startAt,
+682:      $endAt,
+683:      $reason,
+684:      $profile->timezone,
+685:      $replacesBlackoutId,
+686:    );
+687:  }
+688:
+689:  /**
+690:   * {@inheritdoc}
+691:   */
+692:  public function confirmForStaff(WebformSubmissionInterface $submission, Slot $slot): ReservationResult {
+693:    $submissionId = (int) $submission->id();
+694:    if ($submissionId < 1) {
+695:      return ReservationResult::refused(DispatchReason::InvalidRequest);
+696:    }
+697:
+698:    // One job, one claim. Public confirmation is keyed by Hold token and one Hold
+699:    // confirms once; this is keyed by the submission instead, so the same waiting
+700:    // request can be confirmed from two tabs, or by two people who both saw it
+701:    // waiting, and the vehicle would be sent to one move twice.
+702:    if ($this->store->liveClaimForSubmission($submissionId) !== NULL) {
+703:      return ReservationResult::refused(DispatchReason::AlreadyBooked);
+704:    }
+705:
+706:    $request = $this->requestFactory->fromSubmission($submission);
+707:    if ($request === NULL || !$this->dispatchOwnsWebform($request->webformId)) {
+708:      $this->logger->warning('Submission @sid could not be rebuilt into a dispatch-owned request, so staff could not book it.', [
+709:        '@sid' => $submissionId,
+710:      ]);
+711:      return ReservationResult::refused(DispatchReason::NotConfigured);
+712:    }
+713:
+714:    if ($slot->webformId !== $request->webformId) {
+715:      return ReservationResult::refused(DispatchReason::InvalidRequest);
+716:    }
+717:
+718:    // The same two-step transaction the public path runs, with staff authority
+719:    // threaded through both halves. Nothing here re-implements a claim: the Hold
+720:    // is taken under the guard locks, and the plan is re-proved under them again
+721:    // at confirmation, so work staff book is proved exactly as often.
+722:    $held = $this->createHoldFor($request, $slot, PlanAuthority::Staff, $this->finalRouteEstimator);
+723:    if ($held->hold === NULL) {
+724:      return ReservationResult::refused($held->reason);
+725:    }
+726:
+727:    $result = $this->confirmFor($held->hold, $submission, PlanAuthority::Staff, $this->finalRouteEstimator);
+728:    if ($result->reservationId === NULL) {
+729:      // The Hold was taken moments ago and is not going to be confirmed, so it is
+730:      // handed back rather than left to lapse. Leaving it would withhold capacity
+731:      // for the whole configured lifetime and show the board a Resource busy with
+732:      // work that does not exist.
+733:      $this->store->release($held->hold->token, $this->owner->ownerId());
+734:      $this->owner->forgetHold($held->hold->token);
+735:    }
+736:
+737:    return $result;
+738:  }
+739:
+740:  /**
+741:   * Resolves one local date and wall-clock time into a UTC instant.
+742:   *
+743:   * Strict on purpose, and strict elsewhere: the rule lives in LocalWallClock so
+744:   * that a Blackout boundary here, a Replan arrival and a staff confirmation all
+745:   * read a typed time identically. Refusing rather than correcting is the point —
+746:   * a rolled-over time or a local time daylight saving skipped would otherwise
+747:   * close a span on a moment the operator never chose.
+748:   */
+749:  private function localInstant(string $localDate, string $time, \DateTimeZone $zone): ?int {
+750:    return LocalWallClock::instant($localDate, $time, $zone);
+751:  }
+752:
+753:  /**
+754:   * Re-proves a locked Hold against the job the submission describes.
+755:   *
+756:   * Runs inside the storage seam's transaction with the Hold's guard days locked,
+757:   * so the occupancy it reads cannot change under it and no concurrent claim can
+758:   * take the space it is about to confirm.
+759:   *
+760:   * @return \Drupal\custom_webform_handlers\Dispatch\DispatchReason
+761:   *   Available to confirm, or the reason the plan no longer holds.
+762:   */
+763:  private function revalidate(
+764:    LockedHold $locked,
+765:    LockedHold $preparedHold,
+766:    SlotPlan $expected,
+767:    DispatchRequest $request,
+768:    PlanAuthority $authority,
+769:    DispatchRouteEstimatorInterface $estimator,
+770:  ): DispatchReason {
+771:    if ($locked->reservationId !== $preparedHold->reservationId
+772:      || $locked->webformId !== $request->webformId
+773:      || $locked->slot->resourceId !== $preparedHold->slot->resourceId
+774:      || $locked->slot->webformId !== $preparedHold->slot->webformId
+775:      || $locked->slot->startTimestamp !== $preparedHold->slot->startTimestamp) {
+776:      // The Hold belongs to a different form than the submission confirming it.
+777:      return DispatchReason::InvalidRequest;
+778:    }
+779:
+780:    $normalised = $this->normalisedSlot($locked->slot);
+781:    if ($normalised === NULL) {
+782:      return DispatchReason::NotConfigured;
+783:    }
+784:    [$slot, $profile] = $normalised;
+785:
+786:    // The reservation id is excluded from the occupancy read for one reason: a
+787:    // Hold that conflicted with itself could never be confirmed. It is used here
+788:    // and goes no further.
+789:    $plan = $this->planFor(
+790:      $request,
+791:      $slot,
+792:      $profile,
+793:      $locked->reservationId,
+794:      $authority,
+795:      $estimator,
+796:      $expected->routeFacts,
+797:      FALSE,
+798:    );
+799:    if ($plan instanceof DispatchReason) {
+800:      return $plan;
+801:    }
+802:
+803:    return $this->planStillHolds(
+804:      $plan,
+805:      $locked->windowStart,
+806:      $locked->windowEnd,
+807:      $locked->inboundRepositionSeconds,
+808:      $locked->outboundRepositionSeconds,
+809:      $request->webformId,
+810:    );
+811:  }
+812:
+813:  /**
+814:   * Re-derives a plan under the claim locks and reports whether it still holds.
+815:   *
+816:   * The claim-path counterpart to revalidate(). There is no stored row to compare
+817:   * against yet, so the comparison is against the plan the planner derived moments
+818:   * earlier, outside the transaction. Same question either way: is the interval
+819:   * about to be written still the interval the day supports?
+820:   */
+821:  private function replanUnderLock(
+822:    DispatchRequest $request,
+823:    SlotPlan $expected,
+824:    ResourceProfile $profile,
+825:    ?int $excludeReservationId,
+826:    PlanAuthority $authority,
+827:    DispatchRouteEstimatorInterface $estimator,
+828:  ): DispatchReason {
+829:    $plan = $this->planFor(
+830:      $request,
+831:      $expected->offer->slot,
+832:      $profile,
+833:      $excludeReservationId,
+834:      $authority,
+835:      $estimator,
+836:      $expected->routeFacts,
+837:      FALSE,
+838:    );
+839:    if ($plan instanceof DispatchReason) {
+840:      return $plan;
+841:    }
+842:
+843:    return $this->planStillHolds(
+844:      $plan,
+845:      $expected->offer->window->startTimestamp,
+846:      $expected->offer->window->endTimestamp,
+847:      $expected->inboundRepositionSeconds,
+848:      $expected->outboundRepositionSeconds,
+849:      $request->webformId,
+850:    );
+851:  }
+852:
+853:  /**
+854:   * Compares a freshly derived plan with the intervals already committed to.
+855:   *
+856:   * Used by both locked revalidation paths, so a claim and a confirmation apply
+857:   * one definition of "the plan changed" rather than two that can drift apart.
+858:   *
+859:   * @return \Drupal\custom_webform_handlers\Dispatch\DispatchReason
+860:   *   Available when the derived plan fits inside what was reserved, or the reason
+861:   *   it does not.
+862:   */
+863:  private function planStillHolds(
+864:    SlotPlan $plan,
+865:    int $windowStart,
+866:    int $windowEnd,
+867:    int $inboundRepositionSeconds,
+868:    int $outboundRepositionSeconds,
+869:    string $webformId,
+870:  ): DispatchReason {
+871:    // The window reserved and the window now derived must be the same interval.
+872:    // A different one means the facts changed — a longer job, a different route,
+873:    // a re-configured buffer — and the capacity in question was proved for the job
+874:    // as it was, not as it is.
+875:    if ($plan->offer->window->startTimestamp !== $windowStart
+876:      || $plan->offer->window->endTimestamp !== $windowEnd) {
+877:      $this->logger->notice('Dispatch revalidation refused a plan on @webform: the recomputed Dispatch Window no longer matches the interval reserved.', [
+878:        '@webform' => $webformId,
+879:      ]);
+880:      return DispatchReason::SlotUnavailable;
+881:    }
+882:
+883:    // Repositioning may have become cheaper, which is harmless: the reserved
+884:    // margin then simply protects more than the plan needs. Needing more than was
+885:    // reserved is not harmless — the space beyond the reservation was never
+886:    // protected, and another claim may already hold it.
+887:    if ($plan->inboundRepositionSeconds > $inboundRepositionSeconds
+888:      || $plan->outboundRepositionSeconds > $outboundRepositionSeconds) {
+889:      $this->logger->notice('Dispatch revalidation refused a plan on @webform: the sequence now needs more repositioning space than was reserved.', [
+890:        '@webform' => $webformId,
+891:      ]);
+892:      return DispatchReason::RepositioningInfeasible;
+893:    }
+894:
+895:    return DispatchReason::Available;
+896:  }
+897:
+898:  /**
+899:   * Proves one candidate exactly, with its real neighbours.
+900:   *
+901:   * This is the claim-time counterpart to feasibleOffers(). The schedule, break,
+902:   * blackout, horizon, return-to-base and occupancy rules are the same ones; what
+903:   * differs is repositioning. At offer time the neighbours are not knowable and a
+904:   * margin is the honest instrument. Here exactly one candidate is in question, so
+905:   * the two adjacent jobs can be read and their legs routed — which both refuses
+906:   * sequences the margin would have allowed and accepts ones it would have
+907:   * declined.
+908:   *
+909:   * @param \Drupal\custom_webform_handlers\Dispatch\DispatchRequest $request
+910:   *   The normalized request being scheduled.
+911:   * @param \Drupal\custom_webform_handlers\Dispatch\Slot $slot
+912:   *   The exact candidate pickup arrival.
+913:   * @param \Drupal\custom_webform_handlers\Dispatch\ResourceProfile $profile
+914:   *   The selected resource's operating profile.
+915:   * @param int|null $excludeReservationId
+916:   *   A reservation to leave out of the occupancy read, used only so a Hold being
+917:   *   confirmed, or a Reservation being moved, does not conflict with itself.
+918:   * @param \Drupal\custom_webform_handlers\Dispatch\PlanAuthority $authority
+919:   *   Who is asking. Selects which eligibility answer is read and has no other
+920:   *   effect: every check below this gate is a fact about the vehicle and the day.
+921:   * @param \Drupal\custom_webform_handlers\Dispatch\Route\DispatchRouteEstimatorInterface $estimator
+922:   *   The trusted offer or final route estimator selected by the caller.
+923:   *
+924:   * @return \Drupal\custom_webform_handlers\Dispatch\SlotPlan|\Drupal\custom_webform_handlers\Dispatch\DispatchReason
+925:   *   The proved plan, or the reason the candidate is not servable.
+926:   */
+927:  private function preparePlanFor(
+928:    DispatchRequest $request,
+929:    Slot $slot,
+930:    ResourceProfile $profile,
+931:    ?int $excludeReservationId,
+932:    PlanAuthority $authority,
+933:    DispatchRouteEstimatorInterface $estimator,
+934:  ): SlotPlan|DispatchReason {
+935:    return $this->planFor(
+936:      $request,
+937:      $slot,
+938:      $profile,
+939:      $excludeReservationId,
+940:      $authority,
+941:      $estimator,
+942:      new PreparedRouteFacts(),
+943:      TRUE,
+944:    );
+945:  }
+946:
+947:  /**
+948:   * Runs the single feasibility algorithm from prepared or fetchable route facts.
+949:   *
+950:   * $mayFetch is TRUE only before a Resource Calendar Guard transaction. Locked
+951:   * callbacks pass FALSE and therefore either find an exact fresh fact prepared
+952:   * above or refuse; no provider can be reached from the locked path.
+953:   */
+954:  private function planFor(
+955:    DispatchRequest $request,
+956:    Slot $slot,
+957:    ResourceProfile $profile,
+958:    ?int $excludeReservationId,
+959:    PlanAuthority $authority,
+960:    DispatchRouteEstimatorInterface $estimator,
+961:    PreparedRouteFacts $facts,
+962:    bool $mayFetch,
+963:  ): SlotPlan|DispatchReason {
+964:    // Eligibility, first and unconditionally. Whether this job may be booked at
+965:    // all is not a question the presence of a Slot answers.
+966:    //
+967:    // This is the only line in the derivation that authority reaches. A service
+968:    // class is required from both answers, because the duration policy is asked
+969:    // for one and a window derived without a duration would be a window this
+970:    // module invented — which is why a staff override that cannot name a class is
+971:    // refused here exactly as a visitor's would be.
+972:    $outcome = $authority === PlanAuthority::Staff
+973:      ? $this->eligibility->assessForStaff($request)
+974:      : $this->eligibility->assess($request);
+975:    if (!$outcome->bookableBy($authority) || $outcome->serviceClass === NULL) {
+976:      return $outcome->reason;
+977:    }
+978:
+979:    if ($profile->capacity < 1 || $profile->requiresDepotConfiguration()) {
+980:      return DispatchReason::NotConfigured;
+981:    }
+982:
+983:    $day = $this->schedule->dayFor($profile, $slot->localDate());
+984:    if ($day === NULL) {
+985:      // dayFor() refuses a non-working day, a blackout date, a date outside the
+986:      // horizon, a past date, and a malformed calendar alike, and does not say
+987:      // which. Outside working hours is the honest summary of "this Resource
+988:      // does not work then".
+989:      return DispatchReason::OutsideWorkingHours;
+990:    }
+991:    if (!$slot->isAlignedTo($day->gridMinutes)) {
+992:      return DispatchReason::SlotUnavailable;
+993:    }
+994:    if ($this->store->legacyUnplannedDates($profile->resourceId, $day->localDate, $day->localDate) !== []) {
+995:      return DispatchReason::LegacyUnplanned;
+996:    }
+997:
+998:    $duration = $this->durationPolicy->durationFor($request, $outcome->serviceClass);
+999:    if ($duration === NULL) {
+1000:      return DispatchReason::IncompleteFacts;
+1001:    }
+1002:    $promiseMinutes = $this->promiseMinutesFor($duration);
+1003:    if ($promiseMinutes === NULL) {
+1004:      return DispatchReason::NotConfigured;
+1005:    }
+1006:
+1007:    $serviceLeg = $this->routeLeg($facts, $estimator, $request->pickupAddress, $request->deliveryAddress, $slot->startTimestamp, $mayFetch);
+1008:    if ($serviceLeg === NULL) {
+1009:      // Unroutable is unknown, and unknown never shortens a window.
+1010:      return DispatchReason::IncompleteFacts;
+1011:    }
+1012:
+1013:    $routeMinutes = $serviceLeg->minutesCeiling();
+1014:    $operationalBuffer = $this->operationalBufferFor($duration, $profile);
+1015:    $windowMinutes = $duration->pickupMinutes + $routeMinutes + $duration->deliveryMinutes + $operationalBuffer;
+1016:    $start = $slot->startTimestamp;
+1017:    $end = $start + $windowMinutes * 60;
+1018:
+1019:    if ($start <= $this->time->getRequestTime()) {
+1020:      // A pickup arrival that has already passed cannot be served, whether it is
+1021:      // being claimed or confirmed.
+1022:      return DispatchReason::SlotUnavailable;
+1023:    }
+1024:    if (!$day->contains($start, $end)) {
+1025:      return DispatchReason::OutsideWorkingHours;
+1026:    }
+1027:    if ($day->overlapsBreak($start, $end)) {
+1028:      return DispatchReason::BreakConflict;
+1029:    }
+1030:
+1031:    $depot = trim($profile->depotAddress);
+1032:    if ($profile->returnToBase) {
+1033:      // Guaranteed non-empty: requiresDepotConfiguration() refused above.
+1034:      $returnLeg = $this->routeLeg($facts, $estimator, $request->deliveryAddress, $depot, $end, $mayFetch);
+1035:      if ($returnLeg === NULL) {
+1036:        return DispatchReason::IncompleteFacts;
+1037:      }
+1038:      if ($end + $returnLeg->minutesCeiling() * 60 > $day->workEnd) {
+1039:        return DispatchReason::ReturnToBaseInfeasible;
+1040:      }
+1041:    }
+1042:
+1043:    $from = $day->workStart - self::OCCUPANCY_PAD_SECONDS;
+1044:    $to = $day->workEnd + self::OCCUPANCY_PAD_SECONDS;
+1045:    $occupied = $this->store->occupiedIntervals($profile->resourceId, $from, $to, $excludeReservationId);
+1046:    $neighbours = $this->store->planningNeighbours($profile->resourceId, $from, $to, $excludeReservationId);
+1047:
+1048:    $repositionSeconds = max(0, $profile->repositioningBufferMinutes) * 60;
+1049:
+1050:    // Inbound. The job the Resource is coming from, routed exactly; the depot
+1051:    // when nothing precedes this candidate on the day.
+1052:    $previous = $this->previousNeighbour($neighbours, $start);
+1053:    if ($previous !== NULL) {
+1054:      $origin = trim($previous->deliveryLocation);
+1055:      if ($origin === '') {
+1056:        // A neighbour with no stored address cannot be routed, and an
+1057:        // unroutable leg is unknown rather than free.
+1058:        return DispatchReason::IncompleteFacts;
+1059:      }
+1060:      $inboundLeg = $this->routeLeg($facts, $estimator, $origin, $request->pickupAddress, $previous->windowEnd, $mayFetch);
+1061:      if ($inboundLeg === NULL) {
+1062:        return DispatchReason::IncompleteFacts;
+1063:      }
+1064:      $inboundSeconds = $inboundLeg->minutesCeiling() * 60 + $repositionSeconds;
+1065:      if ($start - $inboundSeconds < $previous->windowEnd) {
+1066:        // The drive does not fit in the gap the previous job leaves.
+1067:        return DispatchReason::RepositioningInfeasible;
+1068:      }
+1069:    }
+1070:    elseif ($depot !== '') {
+1071:      $depotLeg = $this->routeLeg($facts, $estimator, $depot, $request->pickupAddress, $day->workStart, $mayFetch);
+1072:      if ($depotLeg === NULL) {
+1073:        return DispatchReason::IncompleteFacts;
+1074:      }
+1075:      $inboundSeconds = $depotLeg->minutesCeiling() * 60 + $repositionSeconds;
+1076:      if ($start - $inboundSeconds < $day->workStart) {
+1077:        // The driver cannot leave the depot early enough to arrive on time.
+1078:        return DispatchReason::RepositioningInfeasible;
+1079:      }
+1080:    }
+1081:    else {
+1082:      // No depot and nothing preceding: there is no departure point to prove a
+1083:      // first job against, so only the configured margin applies. That
+1084:      // combination is an operator choice, not a gap to fill with a guess.
+1085:      $inboundSeconds = $repositionSeconds;
+1086:    }
+1087:
+1088:    // Outbound. The job the Resource is going to, routed exactly; the margin
+1089:    // alone when nothing follows.
+1090:    $next = $this->nextNeighbour($neighbours, $end);
+1091:    if ($next !== NULL) {
+1092:      $destination = trim($next->pickupLocation);
+1093:      if ($destination === '') {
+1094:        return DispatchReason::IncompleteFacts;
+1095:      }
+1096:      $outboundLeg = $this->routeLeg($facts, $estimator, $request->deliveryAddress, $destination, $end, $mayFetch);
+1097:      if ($outboundLeg === NULL) {
+1098:        return DispatchReason::IncompleteFacts;
+1099:      }
+1100:      $outboundSeconds = $outboundLeg->minutesCeiling() * 60 + $repositionSeconds;
+1101:      if ($end + $outboundSeconds > $next->windowStart) {
+1102:        return DispatchReason::RepositioningInfeasible;
+1103:      }
+1104:    }
+1105:    else {
+1106:      $outboundSeconds = $repositionSeconds;
+1107:    }
+1108:
+1109:    // Occupancy last, over the interval the claim will actually protect. The
+1110:    // neighbour checks above prove the two adjacent gaps; this proves nothing
+1111:    // else — a Blackout, a Hold placed since the offer was read — sits inside
+1112:    // the protected span.
+1113:    if ($this->intrudes($occupied, $start - $inboundSeconds, $end + $outboundSeconds)) {
+1114:      return DispatchReason::SlotUnavailable;
+1115:    }
+1116:
+1117:    return new SlotPlan(
+1118:      new SlotOffer(
+1119:        $slot,
+1120:        new DispatchWindow(
+1121:          $start,
+1122:          $end,
+1123:          $duration->pickupMinutes,
+1124:          $routeMinutes,
+1125:          $duration->deliveryMinutes,
+1126:          $operationalBuffer,
+1127:        ),
+1128:        $start + $promiseMinutes * 60,
+1129:        $start + ($duration->pickupMinutes + $routeMinutes) * 60,
+1130:      ),
+1131:      $inboundSeconds,
+1132:      $outboundSeconds,
+1133:      $serviceLeg->seconds,
+1134:      $serviceLeg->meters,
+1135:      $facts,
+1136:    );
+1137:  }
+1138:
+1139:  /**
+1140:   * Returns the Slot restated in its Resource's own terms, with that Resource.
+1141:   *
+1142:   * A Slot arrives carrying a Resource id and a timezone, and neither can be
+1143:   * taken at face value: the timezone decides which local date the schedule is
+1144:   * read for, so a Slot naming a zone the Resource does not operate in would be
+1145:   * planned against the wrong day. The profile is authoritative for both, and a
+1146:   * Slot naming a Resource this installation does not run is refused outright
+1147:   * rather than silently planned against whichever Resource is configured.
+1148:   *
+1149:   * @return array{0: \Drupal\custom_webform_handlers\Dispatch\Slot, 1: \Drupal\custom_webform_handlers\Dispatch\ResourceProfile}|null
+1150:   *   The normalised Slot and its profile, or NULL when neither can be trusted.
+1151:   */
+1152:  private function normalisedSlot(Slot $slot): ?array {
+1153:    $profile = $this->profileFactory->createForResource($slot->resourceId);
+1154:    if ($profile === NULL) {
+1155:      $this->logger->warning('A Dispatch Slot named a Resource this installation does not operate; refusing.');
+1156:      return NULL;
+1157:    }
+1158:
+1159:    if ($slot->timezone === $profile->timezone) {
+1160:      return [$slot, $profile];
+1161:    }
+1162:
+1163:    try {
+1164:      $normalised = new Slot($slot->webformId, $profile->resourceId, $slot->startTimestamp, $profile->timezone);
+1165:    }
+1166:    catch (\InvalidArgumentException) {
+1167:      // A profile with an unusable timezone is a broken profile, not a Slot to
+1168:      // fall back on a default zone for.
+1169:      $this->logger->error('Resource @resource is configured with an unusable timezone, so no Slot can be planned.', [
+1170:        '@resource' => $profile->resourceId,
+1171:      ]);
+1172:      return NULL;
+1173:    }
+1174:
+1175:    return [$normalised, $profile];
+1176:  }
+1177:
+1178:  /**
+1179:   * Returns the job the Resource is coming from, or NULL for the day's first.
+1180:   *
+1181:   * The latest neighbour that has finished by the time this candidate opens. A
+1182:   * neighbour that overlaps the candidate is not a predecessor and is left to the
+1183:   * occupancy check, which refuses it.
+1184:   *
+1185:   * @param \Drupal\custom_webform_handlers\Dispatch\Storage\PlanningNeighbour[] $neighbours
+1186:   *   Neighbouring Dispatch Windows, with the addresses their legs need.
+1187:   * @param int $candidateStart
+1188:   *   The candidate Dispatch Window start, in UTC.
+1189:   */
+1190:  private function previousNeighbour(array $neighbours, int $candidateStart): ?PlanningNeighbour {
+1191:    $previous = NULL;
+1192:    foreach ($neighbours as $neighbour) {
+1193:      if ($neighbour->windowEnd > $candidateStart) {
+1194:        continue;
+1195:      }
+1196:      if ($previous === NULL || $neighbour->windowEnd > $previous->windowEnd) {
+1197:        $previous = $neighbour;
+1198:      }
+1199:    }
+1200:
+1201:    return $previous;
+1202:  }
+1203:
+1204:  /**
+1205:   * Returns the job the Resource is going to, or NULL when nothing follows.
+1206:   *
+1207:   * @param \Drupal\custom_webform_handlers\Dispatch\Storage\PlanningNeighbour[] $neighbours
+1208:   *   Neighbouring Dispatch Windows, with the addresses their legs need.
+1209:   * @param int $candidateEnd
+1210:   *   The candidate Dispatch Window end, in UTC.
+1211:   */
+1212:  private function nextNeighbour(array $neighbours, int $candidateEnd): ?PlanningNeighbour {
+1213:    $next = NULL;
+1214:    foreach ($neighbours as $neighbour) {
+1215:      if ($neighbour->windowStart < $candidateEnd) {
+1216:        continue;
+1217:      }
+1218:      if ($next === NULL || $neighbour->windowStart < $next->windowStart) {
+1219:        $next = $neighbour;
+1220:      }
+1221:    }
+1222:
+1223:    return $next;
+1224:  }
+1225:
+1226:  /**
+1227:   * Tells whether the dispatch planner, and not the older guard, owns a Webform.
+1228:   *
+1229:   * The rule itself lives on DispatchRequestFactory, which already decides what
+1230:   * "dispatch is configured here" means, so the planner, the booking endpoints, and
+1231:   * the Webform handler all read one definition and cannot disagree about which
+1232:   * workflow is enforcing. What this adds is the operator-facing half: a Webform with
+1233:   * both switches on is a misconfiguration that resolves silently in favour of the
+1234:   * guard already taking bookings, and silently is the wrong way for capacity
+1235:   * enforcement to change hands.
+1236:   */
+1237:  private function dispatchOwnsWebform(string $webformId): bool {
+1238:    if ($this->requestFactory->hasConflictingGuards($webformId)) {
+1239:      $this->logger->error('Webform @webform has both the fixed-slot reservation guard and dispatch enabled. Dispatch is standing down so only one guard enforces; disable reservation_enabled to complete the cutover.', [
+1240:        '@webform' => $webformId,
+1241:      ]);
+1242:      return FALSE;
+1243:    }
+1244:
+1245:    return $this->requestFactory->dispatchOwns($webformId);
+1246:  }
+1247:
+1248:  /**
+1249:   * Returns how long a Dispatch Hold lives, in seconds, or NULL.
+1250:   */
+1251:  private function holdSeconds(): ?int {
+1252:    return $this->holdWindow->seconds();
+1253:  }
+1254:
+1255:  /**
+1256:   * Tests every grid candidate on one day and returns the feasible ones.
+1257:   *
+1258:   * @param \Drupal\custom_webform_handlers\Dispatch\DispatchRequest $request
+1259:   *   The normalized request being offered.
+1260:   * @param \Drupal\custom_webform_handlers\Dispatch\ResourceProfile $profile
+1261:   *   The resource's operating profile.
+1262:   * @param \Drupal\custom_webform_handlers\Dispatch\ResourceDay $day
+1263:   *   The local operating-day definition.
+1264:   * @param \Drupal\custom_webform_handlers\Dispatch\ServiceDuration $duration
+1265:   *   The normalized service work duration.
+1266:   * @param \Drupal\custom_webform_handlers\Dispatch\RouteEstimate $serviceLeg
+1267:   *   The prepared pickup-to-destination route.
+1268:   * @param \Drupal\custom_webform_handlers\Dispatch\RouteEstimate|null $depotLeg
+1269:   *   The prepared depot-to-pickup route, when required.
+1270:   * @param \Drupal\custom_webform_handlers\Dispatch\RouteEstimate|null $returnLeg
+1271:   *   The prepared destination-to-depot route, when required.
+1272:   * @param \Drupal\custom_webform_handlers\Dispatch\OccupiedInterval[] $occupied
+1273:   *   Advisory occupancy, including administrative Blackouts.
+1274:   * @param int $promiseMinutes
+1275:   *   The maximum customer-facing pickup promise.
+1276:   *
+1277:   * @return \Drupal\custom_webform_handlers\Dispatch\SlotOffer[]
+1278:   *   Feasible offers, in the order the grid produced them.
+1279:   */
+1280:  private function feasibleOffers(
+1281:    DispatchRequest $request,
+1282:    ResourceProfile $profile,
+1283:    ResourceDay $day,
+1284:    ServiceDuration $duration,
+1285:    RouteEstimate $serviceLeg,
+1286:    ?RouteEstimate $depotLeg,
+1287:    ?RouteEstimate $returnLeg,
+1288:    array $occupied,
+1289:    int $promiseMinutes,
+1290:  ): array {
+1291:    $routeMinutes = $serviceLeg->minutesCeiling();
+1292:    $operationalBuffer = $this->operationalBufferFor($duration, $profile);
+1293:    $windowMinutes = $duration->pickupMinutes + $routeMinutes + $duration->deliveryMinutes + $operationalBuffer;
+1294:    $repositionSeconds = max(0, $profile->repositioningBufferMinutes) * 60;
+1295:    $returnSeconds = $returnLeg === NULL ? 0 : $returnLeg->minutesCeiling() * 60;
+1296:    $now = $this->time->getRequestTime();
+1297:
+1298:    // Stepped on the local clock so the published cadence follows the wall clock
+1299:    // an operator configured. Adding minutes to a local instant advances real
+1300:    // elapsed time, which is what a driver experiences across a DST transition;
+1301:    // any candidate that consequently lands off the local grid is dropped below
+1302:    // rather than published as an off-cadence time.
+1303:    $cursor = (new \DateTimeImmutable('@' . $day->workStart))
+1304:      ->setTimezone($profile->timezoneObject());
+1305:
+1306:    $offers = [];
+1307:    for ($step = 0; $step < self::MAX_GRID_CANDIDATES; $step++) {
+1308:      $start = $cursor->getTimestamp();
+1309:      if ($start > $day->workEnd) {
+1310:        break;
+1311:      }
+1312:
+1313:      $next = $cursor->modify('+' . $day->gridMinutes . ' minutes');
+1314:      if ($next->getTimestamp() <= $start) {
+1315:        // Defensive: a cursor that cannot advance would loop forever.
+1316:        break;
+1317:      }
+1318:      $cursor = $next;
+1319:
+1320:      // A pickup time that has already passed is not bookable, whatever the
+1321:      // schedule says about it.
+1322:      if ($start <= $now) {
+1323:        continue;
+1324:      }
+1325:
+1326:      $end = $start + $windowMinutes * 60;
+1327:
+1328:      // The whole occupied window must sit inside the working interval, not just
+1329:      // its start: a job that begins at 17:30 and runs three hours is not a
+1330:      // 17:30 opening.
+1331:      if (!$day->contains($start, $end)) {
+1332:        continue;
+1333:      }
+1334:      if ($day->overlapsBreak($start, $end)) {
+1335:        continue;
+1336:      }
+1337:
+1338:      // Return to base, when required, must also land inside working hours. The
+1339:      // operational buffer is already inside $end; the return drive is not, and
+1340:      // it is not padded with the repositioning buffer because returning to base
+1341:      // is not travel between two customers' jobs.
+1342:      if ($profile->returnToBase && $end + $returnSeconds > $day->workEnd) {
+1343:        continue;
+1344:      }
+1345:
+1346:      // Inbound space. A candidate that follows another job needs travel room
+1347:      // from an unknown previous delivery, which is enforced as margin. A
+1348:      // candidate that is the day's first job departs the depot, whose address is
+1349:      // known, so that leg is proved exactly against the start of the shift.
+1350:      $inboundSeconds = $repositionSeconds;
+1351:      if (!$this->hasEarlierJob($occupied, $day->workStart, $start)) {
+1352:        if ($depotLeg !== NULL) {
+1353:          $inboundSeconds = $depotLeg->minutesCeiling() * 60 + $repositionSeconds;
+1354:          if ($start - $inboundSeconds < $day->workStart) {
+1355:            // The driver cannot leave the depot early enough to arrive on time.
+1356:            continue;
+1357:          }
+1358:        }
+1359:        // With no depot configured and no return-to-base requirement there is no
+1360:        // departure point to prove a first job against, so only the margin
+1361:        // applies. That combination is an operator choice, and the planner does
+1362:        // not invent a depot to compensate.
+1363:      }
+1364:
+1365:      if ($this->intrudes($occupied, $start - $inboundSeconds, $end + $repositionSeconds)) {
+1366:        continue;
+1367:      }
+1368:
+1369:      $slot = new Slot($request->webformId, $profile->resourceId, $start, $profile->timezone);
+1370:      if (!$slot->isAlignedTo($day->gridMinutes)) {
+1371:        // Only reachable when local-clock arithmetic crossed a transition that
+1372:        // is not a whole multiple of the grid. Publishing such a time would show
+1373:        // a cadence the operator did not configure.
+1374:        continue;
+1375:      }
+1376:
+1377:      $offers[] = new SlotOffer(
+1378:        $slot,
+1379:        new DispatchWindow(
+1380:          $start,
+1381:          $end,
+1382:          $duration->pickupMinutes,
+1383:          $routeMinutes,
+1384:          $duration->deliveryMinutes,
+1385:          $operationalBuffer,
+1386:        ),
+1387:        $start + $promiseMinutes * 60,
+1388:        $start + ($duration->pickupMinutes + $routeMinutes) * 60,
+1389:      );
+1390:    }
+1391:
+1392:    return $offers;
+1393:  }
+1394:
+1395:  /**
+1396:   * Tells whether the Resource is already out on a job before this candidate.
+1397:   *
+1398:   * Blackouts are excluded deliberately: an administrative closure does not put
+1399:   * the driver on the road, so a candidate after one still starts from the depot.
+1400:   *
+1401:   * @param \Drupal\custom_webform_handlers\Dispatch\OccupiedInterval[] $occupied
+1402:   *   Advisory occupancy.
+1403:   * @param int $dayStart
+1404:   *   The local operating day's start, represented in UTC.
+1405:   * @param int $candidateStart
+1406:   *   The candidate pickup arrival, in UTC.
+1407:   */
+1408:  private function hasEarlierJob(array $occupied, int $dayStart, int $candidateStart): bool {
+1409:    foreach ($occupied as $interval) {
+1410:      if ($interval->source === OccupiedInterval::SOURCE_BLACKOUT) {
+1411:        continue;
+1412:      }
+1413:      if ($interval->endTimestamp <= $candidateStart && $interval->endTimestamp > $dayStart) {
+1414:        return TRUE;
+1415:      }
+1416:    }
+1417:
+1418:    return FALSE;
+1419:  }
+1420:
+1421:  /**
+1422:   * Tells whether anything occupies the Resource inside a protected interval.
+1423:   *
+1424:   * The interval includes the repositioning margins, so a neighbouring job that
+1425:   * leaves no travel room is a conflict rather than a tight fit. Blackouts are
+1426:   * treated the same way: a closure that overlaps only the margin still means the
+1427:   * Resource is not free when the sequence needs it.
+1428:   *
+1429:   * Capacity above one is not exploited here. Any overlap refuses the candidate,
+1430:   * which under-offers for a multi-capacity Resource and over-offers for none.
+1431:   *
+1432:   * @param \Drupal\custom_webform_handlers\Dispatch\OccupiedInterval[] $occupied
+1433:   *   Advisory occupancy.
+1434:   * @param int $protectedStart
+1435:   *   The beginning of the protected capacity interval.
+1436:   * @param int $protectedEnd
+1437:   *   The end of the protected capacity interval.
+1438:   */
+1439:  private function intrudes(array $occupied, int $protectedStart, int $protectedEnd): bool {
+1440:    foreach ($occupied as $interval) {
+1441:      if ($interval->intersects($protectedStart, $protectedEnd)) {
+1442:        return TRUE;
+1443:      }
+1444:    }
+1445:
+1446:    return FALSE;
+1447:  }
+1448:
+1449:  /**
+1450:   * Estimates one leg, reusing an estimate already made this invocation.
+1451:   *
+1452:   * The memo is local to a single offerSlots() or planFor() call, so nothing is
+1453:   * carried between requests and a schedule change cannot be served from a stale
+1454:   * figure.
+1455:   *
+1456:   * The departure instant is part of the key, and has to be: the estimator is
+1457:   * traffic-aware, so the same pair of addresses is a different answer at 08:00 and
+1458:   * at 17:00. Keying on the pair alone would hand every leg on the day the traffic
+1459:   * conditions of whichever leg happened to be measured first. This costs nothing in
+1460:   * requests — no two lookups in either caller share both a pair and an instant —
+1461:   * and the adapter's own bucketing is what keeps a day of scheduling down to a
+1462:   * handful of billed calls.
+1463:   *
+1464:   * A leg whose figure carries no traffic data is refused outright when the
+1465:   * operating profile requires traffic-aware scheduling. That refusal is here, at the
+1466:   * one seam every route lookup passes through, so Offer, Hold, Confirm and Replan
+1467:   * cannot diverge on it.
+1468:   *
+1469:   * PreparedRouteFacts is the invocation-local memo. When $mayFetch is FALSE this
+1470:   * method is a pure validation read and cannot reach the provider.
+1471:   */
+1472:  private function routeLeg(
+1473:    PreparedRouteFacts $facts,
+1474:    DispatchRouteEstimatorInterface $estimator,
+1475:    string $origin,
+1476:    string $destination,
+1477:    int $departureAt,
+1478:    bool $mayFetch,
+1479:  ): ?RouteEstimate {
+1480:    $estimate = $facts->find($origin, $destination, $departureAt);
+1481:    if ($estimate === NULL && $mayFetch) {
+1482:      $estimate = $estimator->estimate($origin, $destination, $departureAt);
+1483:      if ($estimate !== NULL) {
+1484:        $facts->remember($origin, $destination, $departureAt, $estimate);
+1485:      }
+1486:    }
+1487:
+1488:    if ($estimate === NULL
+1489:      || !$estimator->accepts($estimate, $origin, $destination, $departureAt)) {
+1490:      return NULL;
+1491:    }
+1492:
+1493:    if (!$estimate->trafficAware && $this->requireTrafficAware()) {
+1494:      // The profile says a schedule may only be built on real traffic data. The
+1495:      // leg is treated as unmeasurable rather than accepted with a margin, which
+1496:      // withholds the Slot and leaves the request for staff to place by hand.
+1497:      $this->logger->notice('Route leg is not traffic-aware and routing.require_traffic_aware is set, so the leg is refused.');
+1498:      return NULL;
+1499:    }
+1500:
+1501:    return $estimate;
+1502:  }
+1503:
+1504:  /**
+1505:   * Returns whether only traffic-aware legs may be scheduled against.
+1506:   *
+1507:   * Defaults to FALSE, which accepts the estimator's conservatively widened figure
+1508:   * when traffic data is unavailable. Setting it makes the planner strict instead:
+1509:   * no traffic data, no Slots, and the request reaches staff rather than being
+1510:   * placed on an assumption.
+1511:   */
+1512:  private function requireTrafficAware(): bool {
+1513:    return (bool) $this->configFactory->get(self::SETTINGS)->get('routing.require_traffic_aware');
+1514:  }
+1515:
+1516:  /**
+1517:   * Returns the end-of-window buffer to apply, in minutes.
+1518:   *
+1519:   * A service-specific buffer wins over the Resource Profile's, because how much
+1520:   * padding a job needs is a property of the job rather than of the van doing it:
+1521:   * a twenty-minute courier run and a full-day move do not want the same absolute
+1522:   * figure. NULL on the duration means the service declined to override, so the
+1523:   * profile's figure stands and today's behaviour is unchanged.
+1524:   */
+1525:  private function operationalBufferFor(ServiceDuration $duration, ResourceProfile $profile): int {
+1526:    return max(0, $duration->operationalBufferMinutes ?? $profile->operationalBufferMinutes);
+1527:  }
+1528:
+1529:  /**
+1530:   * Returns the arrival promise width to state, in minutes, or NULL.
+1531:   *
+1532:   * Same precedence as the buffer, and the same reason. NULL from both the service
+1533:   * and the global setting is still fatal to an offer: an arrival promise is part
+1534:   * of what an offer says, and a width nobody configured is not one to invent.
+1535:   */
+1536:  private function promiseMinutesFor(ServiceDuration $duration): ?int {
+1537:    return $duration->promiseMinutes ?? $this->pickupPromiseMinutes();
+1538:  }
+1539:
+1540:  /**
+1541:   * Returns the configured width of the arrival promise, or NULL.
+1542:   */
+1543:  private function pickupPromiseMinutes(): ?int {
+1544:    $minutes = $this->configFactory->get(self::SETTINGS)->get('durations.pickup_promise_minutes');
+1545:    if (!is_numeric($minutes)) {
+1546:      return NULL;
+1547:    }
+1548:    $minutes = (int) $minutes;
+1549:
+1550:    return $minutes > 0 ? $minutes : NULL;
+1551:  }
+1552:
+1553:}

@@ -1,0 +1,444 @@
+diff --git a/modules/custom_webform_handlers/config/install/custom_webform_handlers.settings.yml b/modules/custom_webform_handlers/config/install/custom_webform_handlers.settings.yml
+--- a/modules/custom_webform_handlers/config/install/custom_webform_handlers.settings.yml
++++ b/modules/custom_webform_handlers/config/install/custom_webform_handlers.settings.yml
+@@ -43,6 +43,7 @@
+ # exists yet; every metered allowance is 0, which means no calls and not no limit;
+ # and Google, the provider in service today, is enabled with an allowance of 0, so
+ # the new chain issues no request until an operator raises it deliberately.
++routing_mode: live_cached
+ routing:
+   # Which calendar an allowance resets on: day or month.
+   billing_period: month
+diff --git a/modules/custom_webform_handlers/custom_webform_handlers.install b/modules/custom_webform_handlers/custom_webform_handlers.install
+--- a/modules/custom_webform_handlers/custom_webform_handlers.install
++++ b/modules/custom_webform_handlers/custom_webform_handlers.install
+@@ -115,6 +115,7 @@
+       'price_snapshot_id' => ['type' => 'varchar_ascii', 'length' => 128, 'not null' => FALSE],
+       'price_snapshot_cents' => ['type' => 'int', 'unsigned' => TRUE, 'not null' => FALSE],
+       'price_snapshot_currency' => ['type' => 'varchar_ascii', 'length' => 3, 'not null' => FALSE],
++      'price_snapshot_version' => ['type' => 'varchar_ascii', 'length' => 64, 'not null' => FALSE],
+       // The Commerce order this capacity was paid through, once one exists.
+       //
+       // Nullable and never unique. Nullable because a Hold has not been paid for
+@@ -4333,3 +4334,38 @@
+ 
+   return (string) t('Created local routing usage counters for the permissioned provider dashboard.');
+ }
++
++/**
++ * Sets default routing mode to live_cached if absent.
++ */
++function custom_webform_handlers_update_10045(): string {
++  $config = \Drupal::configFactory()->getEditable('custom_webform_handlers.settings');
++  if ($config->get('routing_mode') !== NULL) {
++    return (string) t('Routing mode default already exists; nothing changed.');
++  }
++
++  $config->set('routing_mode', 'live_cached')->save();
++  return (string) t('Set default customer routing mode to live_cached.');
++}
++
++/**
++ * Adds pricing-policy version column to Dispatch Reservation price snapshots.
++ */
++function custom_webform_handlers_update_10046(): string {
++  $schema = \Drupal::database()->schema();
++  $table = 'custom_webform_handlers_dispatch_reservation';
++  $field = 'price_snapshot_version';
++
++  if (!$schema->tableExists($table)) {
++    return (string) t('Table does not exist; nothing changed.');
++  }
++
++  if ($schema->fieldExists($table, $field)) {
++    return (string) t('Pricing-policy version column already exists; nothing changed.');
++  }
++
++  $definition = custom_webform_handlers_schema()[$table]['fields'][$field];
++  $schema->addField($table, $field, $definition);
++
++  return (string) t('Added the pricing-policy version to Dispatch Reservation price snapshots.');
++}
+diff --git a/modules/custom_webform_handlers/custom_webform_handlers.services.yml b/modules/custom_webform_handlers/custom_webform_handlers.services.yml
+--- a/modules/custom_webform_handlers/custom_webform_handlers.services.yml
++++ b/modules/custom_webform_handlers/custom_webform_handlers.services.yml
+@@ -604,7 +604,7 @@
+       - '@custom_webform_handlers.dispatch_request_factory'
+       - '@custom_webform_handlers.dispatch_profile_factory'
+       - '@custom_webform_handlers.quote_calculator'
+-      - '@custom_webform_handlers.google_routes_distance_provider'
++      - '@custom_webform_handlers.customer_route_entry_provider'
+       - '@config.factory'
+       - '@commerce_cart.cart_session'
+       - '@entity_type.manager'
+@@ -788,3 +788,20 @@
+       - '@commerce_price.currency_importer'
+       - '@config.factory'
+       - '@logger.channel.custom_webform_handlers'
++
++  custom_webform_handlers.routing_mode_resolver:
++    class: Drupal\custom_webform_handlers\Distance\RoutingModeResolver
++    arguments:
++      - '@config.factory'
++
++  custom_webform_handlers.fixed_development_route_provider:
++    class: Drupal\custom_webform_handlers\Distance\FixedDevelopmentRouteProvider
++    arguments:
++      - '@datetime.time'
++
++  custom_webform_handlers.customer_route_entry_provider:
++    class: Drupal\custom_webform_handlers\Distance\RoutingModeEntryProvider
++    arguments:
++      - '@custom_webform_handlers.routing_mode_resolver'
++      - '@custom_webform_handlers.google_routes_distance_provider'
++      - '@custom_webform_handlers.fixed_development_route_provider'
+diff --git a/modules/custom_webform_handlers/src/Dispatch/DispatchClaim.php b/modules/custom_webform_handlers/src/Dispatch/DispatchClaim.php
+--- a/modules/custom_webform_handlers/src/Dispatch/DispatchClaim.php
++++ b/modules/custom_webform_handlers/src/Dispatch/DispatchClaim.php
+@@ -49,6 +49,8 @@
+    * @param int|null $priceSnapshotCents
+    *   Quoted amount in minor units, when available.
+    * @param string|null $priceSnapshotCurrency
++   * @param string|null $priceSnapshotVersion
++   *   Pricing-policy version snapshot, when available.
+    *   Currency of the quoted amount, when available.
+    */
+   public function __construct(
+@@ -65,6 +67,7 @@
+     public ?string $priceSnapshotId = NULL,
+     public ?int $priceSnapshotCents = NULL,
+     public ?string $priceSnapshotCurrency = NULL,
++    public ?string $priceSnapshotVersion = NULL,
+   ) {}
+ 
+   /**
+diff --git a/modules/custom_webform_handlers/src/Dispatch/DispatchReservationDetail.php b/modules/custom_webform_handlers/src/Dispatch/DispatchReservationDetail.php
+--- a/modules/custom_webform_handlers/src/Dispatch/DispatchReservationDetail.php
++++ b/modules/custom_webform_handlers/src/Dispatch/DispatchReservationDetail.php
+@@ -60,6 +60,8 @@
+    * @param int|null $priceSnapshotCents
+    *   Quoted amount in minor units, as quoted.
+    * @param string|null $priceSnapshotCurrency
++   * @param string|null $priceSnapshotVersion
++   *   Pricing-policy version snapshot.
+    *   Currency of the quoted amount.
+    * @param int $created
+    *   When the row was first written, in UTC.
+@@ -85,6 +87,7 @@
+     public readonly ?string $priceSnapshotId,
+     public readonly ?int $priceSnapshotCents,
+     public readonly ?string $priceSnapshotCurrency,
++    public readonly ?string $priceSnapshotVersion,
+     public readonly int $created,
+     public readonly int $changed,
+   ) {
+diff --git a/modules/custom_webform_handlers/src/Dispatch/Storage/DatabaseReservationStore.php b/modules/custom_webform_handlers/src/Dispatch/Storage/DatabaseReservationStore.php
+--- a/modules/custom_webform_handlers/src/Dispatch/Storage/DatabaseReservationStore.php
++++ b/modules/custom_webform_handlers/src/Dispatch/Storage/DatabaseReservationStore.php
+@@ -232,6 +232,7 @@
+             'price_snapshot_id' => $claim->priceSnapshotId,
+             'price_snapshot_cents' => $claim->priceSnapshotCents,
+             'price_snapshot_currency' => $claim->priceSnapshotCurrency,
++            'price_snapshot_version' => $claim->priceSnapshotVersion,
+             'hold_token_hash' => $this->hash($token),
+             'owner_hash' => $this->hash($claim->ownerId),
+             'expires_at' => $expires,
+@@ -674,6 +675,7 @@
+             'price_snapshot_id' => $current->price_snapshot_id,
+             'price_snapshot_cents' => $current->price_snapshot_cents,
+             'price_snapshot_currency' => $current->price_snapshot_currency,
++            'price_snapshot_version' => $current->price_snapshot_version,
+             // Carried forward for the same reason. The order that paid for this job
+             // paid for the job, not for the hour it was first planned at.
+             'order_id' => $current->order_id,
+@@ -1034,6 +1036,7 @@
+       $row->price_snapshot_id === NULL ? NULL : (string) $row->price_snapshot_id,
+       $row->price_snapshot_cents === NULL ? NULL : (int) $row->price_snapshot_cents,
+       $row->price_snapshot_currency === NULL ? NULL : (string) $row->price_snapshot_currency,
++      $row->price_snapshot_version === NULL ? NULL : (string) $row->price_snapshot_version,
+       (int) $row->created,
+       (int) $row->changed,
+     );
+diff --git a/modules/custom_webform_handlers/src/Distance/RoutingModeResolver.php b/modules/custom_webform_handlers/src/Distance/RoutingModeResolver.php
+new file mode 100644
+--- /dev/null
++++ b/modules/custom_webform_handlers/src/Distance/RoutingModeResolver.php
+@@ -0,0 +1,98 @@
++<?php
++
++namespace Drupal\custom_webform_handlers\Distance;
++
++use Drupal\Core\Config\ConfigFactoryInterface;
++
++/**
++ * Decides which routing mode is in force for this environment.
++ *
++ * One question, asked in one place: may the customer-route entry provider reach
++ * the live Google adapter, or must it serve a deterministic recorded figure that
++ * costs nothing? A ~40,000 request/month environment like DDEV or a local dev
++ * machine must never dial Google, so this class returns development_fixed whenever
++ * getenv('IS_DDEV_PROJECT') is non-empty, regardless of saved configuration.
++ *
++ * Config values:
++ *   - development_fixed: force zero-HTTP recorded routes everywhere.
++ *   - live_cached: cache-first live Google API calls.
++ *
++ * Default when unset:
++ *   - Inside DDEV: development_fixed (environment override; config ignored).
++ *   - Outside DDEV: live_cached (production default, written by hook 10045).
++ *
++ * Configuration hierarchy:
++ *   1. IS_DDEV_PROJECT non-empty -> development_fixed (code-forced, unconditional).
++ *   2. Saved custom_webform_handlers.settings:routing_mode -> used as-is.
++ *   3. Unset on a server that is not DDEV -> defaults to live_cached.
++ *   Production can still be pinned to development_fixed through a settings.php
++ *   config override without editing exported configuration.
++ *
++ * The environment flag is injectable so a non-billing probe can force either
++ * mode with a literal — `new RoutingModeResolver($configFactory, 'false')` asks
++ * the live branch even inside DDEV — without a real key and without a network.
++ * Nothing here reads or stores a credential.
++ */
++final class RoutingModeResolver {
++
++  /**
++   * Deterministic, no-HTTP recorded routes. The mode DDEV always resolves to.
++   */
++  public const MODE_DEVELOPMENT_FIXED = 'development_fixed';
++
++  /**
++   * Cache-first live Google routing. The production default.
++   */
++  public const MODE_LIVE_CACHED = 'live_cached';
++
++  /**
++   * The resolved DDEV signal: 'true' inside a DDEV container, '' otherwise.
++   */
++  private readonly string $environmentFlag;
++
++  /**
++   * Constructs the routing mode resolver.
++   *
++   * @param \Drupal\Core\Config\ConfigFactoryInterface $configFactory
++   *   Reads the routing_mode setting when the environment does not force a mode.
++   * @param string|null $environmentFlag
++   *   The DDEV signal, for tests and probes. NULL — the service default — reads
++   *   getenv('IS_DDEV_PROJECT') at construction. A literal ('true' / 'false')
++   *   forces the branch without touching the environment, so a probe can prove
++   *   either mode without a key or a request.
++   */
++  public function __construct(
++    private readonly ConfigFactoryInterface $configFactory,
++    ?string $environmentFlag = NULL,
++  ) {
++    $this->environmentFlag = $environmentFlag ?? (getenv('IS_DDEV_PROJECT') ?: '');
++  }
++
++  /**
++   * Returns the routing mode in force, one of this class's MODE_* constants.
++   */
++  public function effectiveMode(): string {
++    if ($this->environmentFlag === 'true') {
++      return self::MODE_DEVELOPMENT_FIXED;
++    }
++
++    $configured = (string) $this->configFactory
++      ->get('custom_webform_handlers.settings')
++      ->get('routing_mode');
++
++    return $configured === self::MODE_DEVELOPMENT_FIXED
++      ? self::MODE_DEVELOPMENT_FIXED
++      : self::MODE_LIVE_CACHED;
++  }
++
++  /**
++   * Returns whether no outbound routing request may be made.
++   *
++   * The single predicate the entry facade and the live adapter's fail-closed
++   * guard both read: TRUE means serve a recorded figure and refuse the network.
++   */
++  public function isDevelopmentFixed(): bool {
++    return $this->effectiveMode() === self::MODE_DEVELOPMENT_FIXED;
++  }
++
++}
+diff --git a/modules/custom_webform_handlers/src/Distance/FixedDevelopmentRouteProvider.php b/modules/custom_webform_handlers/src/Distance/FixedDevelopmentRouteProvider.php
+new file mode 100644
+--- /dev/null
++++ b/modules/custom_webform_handlers/src/Distance/FixedDevelopmentRouteProvider.php
+@@ -0,0 +1,118 @@
++<?php
++
++namespace Drupal\custom_webform_handlers\Distance;
++
++use Drupal\Component\Datetime\TimeInterface;
++
++/**
++ * Serves deterministic recorded routes for local development, without HTTP.
++ *
++ * The development half of the routing contract. It implements the same
++ * DistanceProviderInterface the live Google adapter does, returns a valid
++ * DistanceResult for any usable From/To pair, and never opens a socket — so a
++ * developer can price a quote, save a submission, start a checkout and look up
++ * dispatch slots with the network unplugged and no provider ever billed.
++ *
++ * It answers in two ways, in order:
++ *
++ * - An exact recorded fixture, when the normalized address pair's fingerprint
++ *   matches one that has been pinned in FIXTURES. This is where a real
++ *   cached/recorded route fact is reused — a figure actually observed and
++ *   written down by an operator, keyed exactly as the live cache keys it, so a
++ *   fixture reproduces a known journey to the metre. It ships empty on purpose:
++ *   a fixture is added deliberately, not scraped, and the module must work
++ *   before any exist.
++ * - Otherwise one documented fixed fallback. Every unpinned pair resolves to the
++ *   same local NYC-metro figure, which is the point — it is deterministic, it
++ *   exercises courier excess-distance pricing and slot travel time, and it does
++ *   not depend on any historic record existing.
++ *
++ * The input contract mirrors the live adapter: an empty endpoint, or two
++ * endpoints that are the same address, is unusable everywhere and is refused
++ * with the same classified terminal failure rather than being priced as a
++ * zero-length drive.
++ *
++ * The result names itself development_fixed and carries data_version
++ * ddev-fixed-v1, so nothing downstream can mistake a development figure for a
++ * live one — the quote endpoint's client-echo gate, which trusts only
++ * 'google_routes', rejects it and recomputes server-side, which here is free.
++ */
++final class FixedDevelopmentRouteProvider implements DistanceProviderInterface {
++
++  /**
++   * The provider identifier this provider stamps on every result.
++   */
++  public const PROVIDER_ID = 'development_fixed';
++
++  /**
++   * The recorded-fixture dataset version, carried in result metadata.
++   */
++  public const DATA_VERSION = 'ddev-fixed-v1';
++
++  /**
++   * The documented fallback distance, in meters. 19312 m is 12.0 statute miles.
++   *
++   * Chosen to sit above the courier included-mileage threshold (5 mi) so excess
++   * distance is exercised, and well below the commercial (50 mi) and
++   * long-distance tiers, so a local form test reads as a local move.
++   */
++  private const FALLBACK_DISTANCE_METERS = 19312;
++
++  /**
++   * The documented fallback duration, in seconds. 1680 s is 28 minutes.
++   */
++  private const FALLBACK_DURATION_SECONDS = 1680;
++
++  /**
++   * Exact recorded routes, keyed by DistanceResult::pairFingerprint().
++   *
++   * Each key is the sha256 of the two normalized, lowercased endpoints joined by
++   * a NUL, and each value is [distanceMeters, durationSeconds] observed for that
++   * ordered pair. Add an entry to reproduce a known journey exactly; leave it
++   * empty and every pair uses the documented fallback.
++   *
++   * @var array<string, array{0: int, 1: int}>
++   */
++  private const FIXTURES = [];
++
++  /**
++   * Constructs the fixed development route provider.
++   *
++   * @param \Drupal\Component\Datetime\TimeInterface|null $time
++   *   Supplies the calculation timestamp. NULL falls back to time(), so direct
++   *   construction in a probe needs no container.
++   */
++  public function __construct(
++    private readonly ?TimeInterface $time = NULL,
++  ) {}
++
++  /**
++   * {@inheritdoc}
++   */
++  public function calculate(string $origin, string $destination): DistanceResult {
++    $origin = DistanceResult::normalizeAddressText($origin);
++    $destination = DistanceResult::normalizeAddressText($destination);
++    if ($origin === ''
++      || $destination === ''
++      || mb_strtolower($origin, 'UTF-8') === mb_strtolower($destination, 'UTF-8')) {
++      throw DistanceProviderException::classified(DistanceProviderException::ADDRESS_UNUSABLE);
++    }
++
++    $fingerprint = DistanceResult::pairFingerprint($origin, $destination);
++    [$meters, $seconds] = self::FIXTURES[$fingerprint]
++      ?? [self::FALLBACK_DISTANCE_METERS, self::FALLBACK_DURATION_SECONDS];
++
++    $now = $this->time?->getCurrentTime() ?? time();
++
++    return new DistanceResult(
++      $meters,
++      $seconds,
++      self::PROVIDER_ID,
++      $now,
++      NULL,
++      FALSE,
++      ['data_version' => self::DATA_VERSION],
++    );
++  }
++
++}
+diff --git a/modules/custom_webform_handlers/src/Distance/RoutingModeEntryProvider.php b/modules/custom_webform_handlers/src/Distance/RoutingModeEntryProvider.php
+new file mode 100644
+--- /dev/null
++++ b/modules/custom_webform_handlers/src/Distance/RoutingModeEntryProvider.php
+@@ -0,0 +1,52 @@
++<?php
++
++namespace Drupal\custom_webform_handlers\Distance;
++
++/**
++ * The one customer-route entry point every quote and booking seam calls.
++ *
++ * Before this facade, three seams — the quote preview controller, the
++ * AddressDistanceHandler pre-save, and the dispatch checkout starter — each
++ * injected the live Google adapter directly and called it whenever a server key
++ * was present, with nothing between them and Guzzle. That is what let local
++ * development bill the live provider. Now all three inject this, and the choice
++ * of provider is made once, here, from the routing mode.
++ *
++ * It implements DistanceProviderInterface itself, so it is a drop-in replacement
++ * at every seam and adds no method a caller has to learn. It owns no cache, no
++ * budget and no provider chain: development_fixed delegates to the deterministic
++ * recorded provider, live_cached delegates to the unchanged Google adapter,
++ * whose own cache-first behaviour and one-request-per-committed-pair controls
++ * are preserved exactly. There is one authority for each mode and this picks
++ * between them; it does not duplicate either.
++ */
++final class RoutingModeEntryProvider implements DistanceProviderInterface {
++
++  /**
++   * Constructs the customer-route entry facade.
++   *
++   * @param \Drupal\custom_webform_handlers\Distance\RoutingModeResolver $resolver
++   *   Decides which provider answers.
++   * @param \Drupal\custom_webform_handlers\Distance\DistanceProviderInterface $liveProvider
++   *   The live, cache-first provider used in live_cached mode.
++   * @param \Drupal\custom_webform_handlers\Distance\DistanceProviderInterface $developmentProvider
++   *   The deterministic no-HTTP provider used in development_fixed mode.
++   */
++  public function __construct(
++    private readonly RoutingModeResolver $resolver,
++    private readonly DistanceProviderInterface $liveProvider,
++    private readonly DistanceProviderInterface $developmentProvider,
++  ) {}
++
++  /**
++   * {@inheritdoc}
++   */
++  public function calculate(string $origin, string $destination): DistanceResult {
++    $provider = $this->resolver->isDevelopmentFixed()
++      ? $this->developmentProvider
++      : $this->liveProvider;
++
++    return $provider->calculate($origin, $destination);
++  }
++
++}

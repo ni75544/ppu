@@ -35,6 +35,16 @@ custom_webform_handlers.settings:
     preview_debounce_ms:
       type: integer
       label: 'Milliseconds an address edit must settle before a preview is requested'
+    routing_mode:
+      type: string
+      label: 'Customer routing mode (development_fixed or live_cached)'
+    booking_admission:
+      type: mapping
+      label: 'Booking admission (per-submission job exclusivity)'
+      mapping:
+        enforce:
+          type: boolean
+          label: 'Enforce booking admission (missing or false means disabled)'
     # Multi-provider routing. Deliberately a sibling of the route_* keys above rather
     # than a replacement for them: those keys still own Google's timeout and its two
     # cache lifetimes, and this subtree defers to them so that a Google timing has one

@@ -25,6 +25,9 @@ final class ReservationRecord {
     public readonly ?int $expiresAt,
     public readonly int $created,
     public readonly int $changed,
+    // Booking-admission generation (Task 24C-7A). NULL for a row that was never
+    // enrolled and for one read without the column; passive carriage only.
+    public readonly ?int $admissionGeneration = NULL,
   ) {}
 
   /**
@@ -48,6 +51,9 @@ final class ReservationRecord {
       ($row->expires_at ?? NULL) === NULL ? NULL : (int) $row->expires_at,
       (int) $row->created,
       (int) $row->changed,
+      // Present only when the reader selected it (migrated schema); isset() keeps
+      // an unselected or NULL column as NULL rather than zero (Task 24C-7A).
+      isset($row->admission_generation) ? (int) $row->admission_generation : NULL,
     );
   }
 

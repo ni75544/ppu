@@ -6,7 +6,11 @@ use Drupal\commerce_order\Entity\OrderInterface;
 use Drupal\commerce_payment\Entity\PaymentInterface;
 use Drupal\commerce_payment\Plugin\Commerce\PaymentGateway\SupportsAuthorizationsInterface;
 use Drupal\commerce_payment\Plugin\Commerce\PaymentGateway\SupportsVoidsInterface;
+use Drupal\commerce_price\Calculator;
+use Drupal\commerce_price\Price;
 use Drupal\Component\Datetime\TimeInterface;
+use Drupal\Core\Database\Connection;
+use Drupal\Core\Database\Transaction;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\custom_webform_handlers\Checkout\CheckoutAttempt;
 use Drupal\custom_webform_handlers\Checkout\CheckoutAttemptStore;
@@ -16,6 +20,7 @@ use Drupal\custom_webform_handlers\Checkout\CheckoutState;
 use Drupal\custom_webform_handlers\Checkout\DispatchCheckoutManagerInterface;
 use Drupal\custom_webform_handlers\Checkout\PaidDispatchReference;
 use Drupal\custom_webform_handlers\Checkout\QuoteSnapshot;
+use Drupal\custom_webform_handlers\Dispatch\Admission\BookingAdmissionStoreInterface;
 use Drupal\custom_webform_handlers\Dispatch\BookingWorkflow;
 use Drupal\custom_webform_handlers\Dispatch\BookingWorkflowGate;
 use Drupal\custom_webform_handlers\Dispatch\DispatchOwner;
@@ -25,6 +30,7 @@ use Drupal\custom_webform_handlers\Dispatch\DispatchRequestFactory;
 use Drupal\custom_webform_handlers\Dispatch\Hold;
 use Drupal\custom_webform_handlers\Dispatch\Notify\DispatchNotification;
 use Drupal\custom_webform_handlers\Dispatch\Notify\DispatchNotifierInterface;
+use Drupal\custom_webform_handlers\Dispatch\PreparedHold;
 use Drupal\custom_webform_handlers\Dispatch\ReservationResult;
 use Drupal\custom_webform_handlers\Dispatch\ResourceProfileFactory;
 use Drupal\custom_webform_handlers\Dispatch\Slot;
@@ -77,6 +83,19 @@ final class DispatchCheckoutManager implements DispatchCheckoutManagerInterface 
     private readonly DispatchNotifierInterface $notifier,
     private readonly ReviewManagerInterface $reviews,
     private readonly DomainEventEmitter $events,
+    // Booking admission store (Task 24C, Batch 1). Held, not called: this batch is
+    // inert wiring, so the constructor only assigns it and no method here reads an
+    // admission table. The first call is added later behind booking_admission.enforce,
+    // which ships false, so an unmigrated site is unaffected by this injection.
+    private readonly BookingAdmissionStoreInterface $bookingAdmissionStore,
+    // The shared database connection (Task 24C-8C). start() opens one caller-owned
+    // writer transaction on it so the guarded claim, the draft order, and the Checkout
+    // Attempt row commit or roll back as a unit. It is the same '@database' the
+    // calendar guard, the dispatch reservation store, the checkout-attempt store, and
+    // Commerce entity storage all write through, so their writes nest as savepoints
+    // under this transaction. It owns no admission call: Task 24C-8C introduces
+    // transaction ownership, not booking-admission enforcement.
+    private readonly Connection $database,
   ) {}
 
   /**
@@ -92,6 +111,17 @@ final class DispatchCheckoutManager implements DispatchCheckoutManagerInterface 
    * @see \Drupal\custom_webform_handlers\Checkout\DispatchCheckoutManagerInterface::start()
    */
   public function start(WebformSubmissionInterface $submission, Slot $slot, CheckoutContact $contact, QuoteSnapshot $quote): CheckoutOutcome {
+    // Ownership precedes everything (Task 24C-8C-R1). This use case must own the outermost
+    // writer transaction for the whole booking — preparation runs before it, the claim, order,
+    // and attempt inside it, and the receipt only after it commits. If a transaction is already
+    // open on the shared connection, start() cannot own the outermost commit, so it refuses
+    // here — before preparation, before the route provider is ever reached, and before any
+    // booking effect — without opening or disturbing any transaction.
+    if ($this->database->inTransaction()) {
+      $this->logger->error('A dispatch checkout was refused: a database transaction is already open, so start() cannot own the outermost commit.');
+      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+    }
+
     $submissionId = (int) $submission->id();
     $webformId = (string) ($submission->getWebform()?->id() ?? '');
     if ($submissionId < 1 || $webformId === '') {
@@ -126,21 +156,25 @@ final class DispatchCheckoutManager implements DispatchCheckoutManagerInterface 
       return $repeat;
     }
 
-    $held = $this->planner->createCheckoutHold($request, $resolved);
-    if (!$held->isHeld() || $held->hold === NULL) {
-      // The planner's own refusal, passed through unchanged. It has already
-      // decided grid alignment, working hours, repositioning, and contention, and
-      // a second opinion here would be a second scheduling authority.
-      return CheckoutOutcome::refused($held->reason);
+    // The three checkout phases are run as separate operations here so a single
+    // caller-owned transaction can span the claim, the order, and the attempt, with
+    // route preparation before it and the session receipt after its commit. The
+    // combined createCheckoutHold() wrapper is deliberately NOT used: it publishes the
+    // receipt the moment the claim succeeds — before the order and the attempt exist,
+    // and before any commit this method controls.
+    //
+    // A. Prepare — route I/O and plan derivation, before the writer transaction opens
+    // (never inside it). The checkout-only final-route estimator is fixed server-side
+    // in this seam and is never a parameter, so the authority boundary is preserved.
+    $prepared = $this->planner->prepareCheckoutHold($request, $resolved, $quote);
+    if ($prepared instanceof DispatchReason) {
+      // The planner's own refusal, passed through unchanged. It has already decided
+      // eligibility, grid alignment, working hours, repositioning, and the route facts,
+      // and a second opinion here would be a second scheduling authority.
+      return CheckoutOutcome::refused($prepared);
     }
 
-    $order = $this->orderFactory->create($submission, $resolved, $contact, $quote);
-    if ($order === NULL) {
-      $this->releaseHold($held->hold);
-      return CheckoutOutcome::refused(DispatchReason::NotConfigured);
-    }
-
-    return $this->recordAttempt($order, $submissionId, $resolved, $quote, $held->hold);
+    return $this->bindCheckoutHold($prepared, $submission, $submissionId, $resolved, $contact, $quote);
   }
 
   /**
@@ -190,7 +224,7 @@ final class DispatchCheckoutManager implements DispatchCheckoutManagerInterface 
       return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
     }
 
-    return $this->confirmHeld($attempt->orderId, $attempt->slot, $submission);
+    return $this->confirmHeld($attempt->orderId, $attempt->slot, $submission, $attempt->quote);
   }
 
   /**
@@ -287,38 +321,363 @@ final class DispatchCheckoutManager implements DispatchCheckoutManagerInterface 
   }
 
   /**
-   * Writes the lifecycle row, and undoes the order and Hold if it cannot.
+   * Runs the claim, the order, and the attempt as one caller-owned transaction.
    *
-   * The unique index can still answer with somebody else's row, which is the true
-   * race the pre-flight lookups cannot close. When it does, ours is the duplicate:
-   * the draft order is deleted, the Hold this request took is given back, and the
-   * customer is sent to the order that won. Releasing our own token cannot strip
-   * the winner's Hold, because every claim inserts its own row with its own token.
+   * The deliberate transaction integration (Task 24C-8C, corrected in 24C-8C-R1).
+   * Preparation and the ambient-transaction check already happened in start(), before this
+   * method and before any provider call. Here one writer transaction is opened on the shared
+   * connection and the three durable effects are written inside it: the guarded claim (which
+   * nests its own Resource Calendar Guard transaction as a savepoint), the draft Commerce order
+   * and item (whose entity saves run on the same connection and so nest too), and the Checkout
+   * Attempt row. They commit or roll back together.
+   *
+   * Completion is verified, not assumed (Task 24C-8C-R2). The root transaction is completed by
+   * destroying its object; an ordinary commit is then established from combined supported evidence
+   * — the client was in a transaction immediately before destruction (which excludes a void), a
+   * post-transaction callback reports not-rolled-back, and both the Drupal stack and the client are
+   * closed afterwards. A void, a rollback, a thrown commit, or a missing signal all withhold the
+   * receipt and the started() outcome. Safe disposal after a FAILED rollback is a BLOCKED residual
+   * (see the 24C-8C-R2 decision record); it is reported, not resolved here.
+   *
+   * Admission is not consulted here. Task 24C-8C introduces transaction ownership, not
+   * booking-admission enforcement: no acquire()/verify()/confirm()/release() call, no generation
+   * supplied, and no admission-row lock. The atomicity comes entirely from the one shared outer
+   * transaction, never from an admission lock.
    */
-  private function recordAttempt(OrderInterface $order, int $submissionId, Slot $slot, QuoteSnapshot $quote, Hold $hold): CheckoutOutcome {
-    $orderId = (int) $order->id();
-    $attempt = $this->attempts->open(
-      CheckoutAttempt::opening($orderId, $submissionId, $slot, $quote, $this->time->getRequestTime()),
-    );
-
-    if ($attempt === NULL) {
-      // No row, so there is no lifecycle. An order left behind here would look
-      // payable and could never be confirmed, so it does not survive this method.
-      $this->orderFactory->discard($order);
-      $this->releaseHold($hold);
-      $this->logger->error('A dispatch checkout attempt could not be recorded for order @order; the order and Hold were withdrawn.', [
-        '@order' => $orderId,
+  private function bindCheckoutHold(
+    PreparedHold $prepared,
+    WebformSubmissionInterface $submission,
+    int $submissionId,
+    Slot $slot,
+    CheckoutContact $contact,
+    QuoteSnapshot $quote,
+  ): CheckoutOutcome {
+    // Defensive: start() already refused an ambient transaction before preparation, so this is
+    // only reached with no transaction open. The check is repeated at the boundary that opens
+    // the transaction, because owning the outermost transaction is this method's precondition.
+    if ($this->database->inTransaction()) {
+      $this->logger->error('A dispatch checkout binding was refused for submission @sid: a database transaction is already open, so this manager cannot own the outermost commit.', [
+        '@sid' => $submissionId,
       ]);
       return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
     }
 
-    if ($attempt->orderId !== $orderId) {
-      $this->orderFactory->discard($order);
-      $this->releaseHold($hold);
-      return CheckoutOutcome::started($attempt->orderId);
+    // B. Acquire one caller-owned writer transaction on the shared connection. Acquisition
+    // failure is a refusal, not a rollback target: there is no transaction to roll back, so a
+    // throw here must never reach the rollback path below.
+    try {
+      $transaction = $this->database->startTransaction();
+    }
+    catch (\Throwable $exception) {
+      $this->logger->error('A dispatch checkout binding could not open a writer transaction for submission @sid: @type. Nothing was claimed, ordered, or recorded.', [
+        '@sid' => $submissionId,
+        '@type' => get_class($exception),
+      ]);
+      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+    }
+
+    try {
+      // C. Claim under the Resource Calendar Guard. The guard opens its own transaction on this
+      // same connection, which nests as a savepoint; completing it releases that savepoint but
+      // commits nothing. The claim writes no session receipt and performs no route I/O under
+      // the lock (its locked revalidation is confined to the facts prepared above).
+      $held = $this->planner->claimPreparedCheckoutHold($prepared);
+      if (!$held->isHeld() || $held->hold === NULL) {
+        // The planner's own capacity refusal, returned rather than thrown. Nothing of ours
+        // should persist, so the transaction is rolled back and the reason passed through.
+        $this->rollBackBinding($transaction, $submissionId);
+        return CheckoutOutcome::refused($held->reason);
+      }
+      $hold = $held->hold;
+
+      // D. The draft order and its item. Both saves run through Commerce's entity storage on
+      // this same connection, so they participate in this transaction and a rollback unwinds
+      // their rows too.
+      $order = $this->orderFactory->create($submission, $slot, $contact, $quote);
+      if ($order === NULL) {
+        // A refusal, not a failure to report upward. The claim is rolled back with it, so the
+        // Hold row never becomes durable. No separate release is issued: there is no committed
+        // row to release and no receipt to forget.
+        $this->rollBackBinding($transaction, $submissionId);
+        return CheckoutOutcome::refused(DispatchReason::NotConfigured);
+      }
+      $orderId = (int) $order->id();
+
+      // E. The lifecycle row that names the order and the Hold.
+      $attempt = $this->attempts->open(
+        CheckoutAttempt::opening($orderId, $submissionId, $slot, $quote, $this->time->getRequestTime()),
+      );
+
+      if ($attempt === NULL) {
+        // No lifecycle row, so nothing could ever confirm this order. The transaction is rolled
+        // back rather than discarding each row by hand. The rollback OUTCOME is recorded, not
+        // assumed: the log states whether cleanup was confirmed disposed, unknown, or failed — it
+        // does not claim rows were removed merely because a rollback was requested (R2 §2C). The
+        // in-memory order keeps its id after a rollback, so its entity caches are reset: that id
+        // is not evidence its row survived.
+        $cleanup = $this->rollBackBinding($transaction, $submissionId);
+        $this->discardOrderCaches($order);
+        $this->logger->error('A dispatch checkout attempt could not be recorded for order @order; binding cleanup @cleanup.', [
+          '@order' => $orderId,
+          '@cleanup' => $cleanup,
+        ]);
+        return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+      }
+
+      if ($attempt->orderId !== $orderId) {
+        // The unique index answered with another request's row: ours is the duplicate. Roll back
+        // our new work and resume the winner only through the SAME permitted states the pre-flight
+        // lookup honours AND only when our own cleanup is confirmed. Our receipt is never published
+        // (publication is the post-commit step below, which this path does not reach), and the
+        // winner's records are untouched.
+        $cleanup = $this->rollBackBinding($transaction, $submissionId);
+        $this->discardOrderCaches($order);
+        if ($attempt->state->hasReservation()) {
+          // Paid or ReconciliationRequired: already booked. A refusal, so it is safe whatever our
+          // cleanup outcome — it opens no booking and makes no durability claim.
+          return CheckoutOutcome::refused(DispatchReason::AlreadyBooked);
+        }
+        if ($attempt->isOpen() && $cleanup === self::ROLLBACK_DISPOSED) {
+          // Pending AND our losing work is confirmed disposed: resume the existing order, exactly
+          // as existingAttempt() does. started() is WITHHELD when cleanup is unknown or failed,
+          // because resuming while our own order/claim might still be partially persisted would
+          // return success over an uncertain write (R2 §2C).
+          return CheckoutOutcome::started($attempt->orderId);
+        }
+        // Terminal (Failed/Cancelled), or a Pending winner whose resume cannot be confirmed because
+        // our cleanup was unknown/failed. A terminal attempt is never resumed as started();
+        // CheckoutAttemptStore::settle() releases the idempotency key on a terminal settlement, so
+        // open()'s key-collision reread cannot return a Failed/Cancelled row — a defensive floor,
+        // not a reproduced race. Real unique-index contention and isolation remain PENDING.
+        $this->logger->error('A dispatch checkout duplicate for order @order resolved to an attempt on order @winner in state @state with cleanup @cleanup; refusing (started() withheld unless Pending with confirmed cleanup).', [
+          '@order' => $orderId,
+          '@winner' => $attempt->orderId,
+          '@state' => $attempt->state->value,
+          '@cleanup' => $cleanup,
+        ]);
+        return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+      }
+    }
+    catch (\Throwable $exception) {
+      // Any thrown failure inside the binding unwinds everything written in it. The rollback is
+      // attempted and its OUTCOME recorded distinctly — a rollback that threw, or returned while
+      // the client transaction is still open, is reported as failed/unknown, never as "rolled
+      // back". The original failure (its type) is preserved and the cleanup outcome logged beside
+      // it; only the types are logged, because a storage exception can quote a customer's own
+      // facts. This returns a refusal and never reaches the commit, the receipt, or a started()
+      // outcome. NOTE (R2 §2D / guarantee 3): a thrown client rollBack() leaves the manager Active,
+      // so the Transaction's later destruction could still commit; that residual is BLOCKED on the
+      // connection-lifecycle disposal in the decision record, not resolved here.
+      $cleanup = $this->rollBackBinding($transaction, $submissionId);
+      if (isset($order)) {
+        $this->discardOrderCaches($order);
+      }
+      $this->logger->error('A dispatch checkout binding failed for submission @sid (@type); cleanup @cleanup.', [
+        '@sid' => $submissionId,
+        '@type' => get_class($exception),
+        '@cleanup' => $cleanup,
+      ]);
+      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+    }
+
+    // F. Complete the outermost transaction, then VERIFY an ordinary commit before publishing.
+    // Destroying the root Transaction drives the installed manager's commit, which is NOT self-
+    // evidently durable: processRootCommit() throws on a failed client commit (caught below), and
+    // the MySQL driver VOIDS the root WITHOUT throwing when the client is already out of a
+    // transaction. A post-transaction callback reports not-rolled-back but conflates Committed and
+    // Voided (R2 §2A), so it cannot alone establish an ordinary commit.
+    //
+    // The commit is established from combined supported evidence: the client was in a transaction
+    // IMMEDIATELY BEFORE destruction (which excludes the void branch, since a void requires the
+    // client already out), the callback reports not-rolled-back, and both the Drupal stack and the
+    // client are out of a transaction afterwards. The observer setup is itself inside the failure
+    // handling, because addPostTransactionCallback() throws when no transaction is active and such
+    // a setup failure must not bypass the outcome policy (R2 §2E).
+    $rootResolved = NULL;
+    try {
+      $clientInTxBefore = $this->clientInTransaction();
+      $manager = $this->database->transactionManager();
+      if ($manager !== FALSE) {
+        $manager->addPostTransactionCallback(static function (bool $success) use (&$rootResolved): void {
+          $rootResolved = $success;
+        });
+      }
+    }
+    catch (\Throwable $exception) {
+      // The completion observer could not be set up (e.g. no active transaction). The outcome
+      // cannot be observed, so success is withheld. A rollback is attempted and its outcome
+      // recorded; the booking is neither deleted nor recreated.
+      $cleanup = $this->rollBackBinding($transaction, $submissionId);
+      $this->logger->error('A dispatch checkout binding for order @order could not set up its completion observer (@type); cleanup @cleanup. No receipt was published.', [
+        '@order' => $orderId,
+        '@type' => get_class($exception),
+        '@cleanup' => $cleanup,
+      ]);
+      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+    }
+
+    try {
+      unset($transaction);
+    }
+    catch (\Throwable $exception) {
+      // The root commit threw (e.g. TransactionCommitFailedException). The outcome is uncertain:
+      // no receipt is published, and the booking is neither deleted nor recreated. A later
+      // same-intent retry resolves against whatever did or did not commit, through the pre-flight
+      // lookup and the unique index.
+      $this->logger->error('A dispatch checkout binding for order @order did not complete its root commit: @type. No receipt was published; nothing was deleted or recreated.', [
+        '@order' => $orderId,
+        '@type' => get_class($exception),
+      ]);
+      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+    }
+
+    $clientInTxAfter = $this->clientInTransaction();
+    if ($clientInTxBefore !== TRUE || $rootResolved !== TRUE || $this->database->inTransaction() || $clientInTxAfter === TRUE) {
+      // Not an established ordinary commit: the client was not in a transaction before destruction
+      // (a void / implicit upstream commit, client_before !== TRUE), the callback reported a
+      // rollback or never fired (resolved !== TRUE), or the Drupal/client transaction is still open
+      // afterwards. None of these is a durable ordinary commit, so no receipt and no started()
+      // outcome; the records are left exactly as they are. A void is NOT treated as a successful
+      // implicit commit (R2 §2A).
+      $this->logger->error('A dispatch checkout binding for order @order could not confirm an ordinary root commit (client_before=@b, resolved=@r, drupal_in_tx=@d, client_after=@a); no receipt was published.', [
+        '@order' => $orderId,
+        '@b' => var_export($clientInTxBefore, TRUE),
+        '@r' => var_export($rootResolved, TRUE),
+        '@d' => var_export($this->database->inTransaction(), TRUE),
+        '@a' => var_export($clientInTxAfter, TRUE),
+      ]);
+      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+    }
+
+    // G. An ordinary root commit is established (not a void, not a rollback): publish the session
+    // receipt, then return success. A publication failure here cannot roll the committed booking
+    // back and must not delete or recreate it; it is logged and refused safely. (Real-database
+    // atomicity remains PENDING, and safe disposal after a FAILED rollback remains BLOCKED per the
+    // 24C-8C-R2 decision record; neither is claimed resolved by this gate.)
+    try {
+      $this->planner->publishCheckoutHoldReceipt($hold);
+    }
+    catch (\Throwable $exception) {
+      $this->logger->error('Order @order completed its root transaction but its session receipt could not be published: @type. The booking was left intact; it was not deleted or recreated.', [
+        '@order' => $orderId,
+        '@type' => get_class($exception),
+      ]);
+      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
     }
 
     return CheckoutOutcome::started($orderId);
+  }
+
+  /**
+   * The rollback outcomes this manager distinguishes (Task 24C-8C-R2 §2B).
+   *
+   * DISPOSED — rollBack() returned AND the client transaction is confirmed closed, so the
+   * uncommitted writes are not durable. UNKNOWN — rollBack() returned but the client transaction
+   * is still open or could not be read, so cleanup is not established. FAILED — rollBack() threw,
+   * so the manager may remain Active and destruction could still commit (the BLOCKED residual).
+   */
+  private const ROLLBACK_DISPOSED = 'disposed';
+  private const ROLLBACK_UNKNOWN = 'unknown';
+  private const ROLLBACK_FAILED = 'failed';
+
+  /**
+   * Rolls back the binding transaction and reports a CONFIRMED outcome, never a presumed one.
+   *
+   * Normal return from rollBack() does NOT establish a successful rollback: the installed MySQL
+   * driver's rollbackClientTransaction() can return FALSE (RollbackFailed) or void, and
+   * processRootRollback() discards that bool (R2 §2B). So completion is confirmed from the
+   * client-level transaction state: DISPOSED only when the client is no longer in a transaction
+   * afterwards; UNKNOWN when it is still open or unreadable; FAILED when rollBack() threw. The
+   * caller refuses on anything but DISPOSED and never claims rows were removed merely because a
+   * rollback was requested. Only the exception type is logged, never its message.
+   *
+   * BLOCKED residual (decision record, guarantee 3): a rollBack() that THROWS leaves the manager
+   * Active (the driver assigns the state only AFTER the client call returns), so the Transaction's
+   * destruction can still processRootCommit() and commit. This method cannot neutralise that
+   * without a connection-lifecycle disposal (voidClientTransaction() + a client reset), a scope
+   * expansion held for separate authorization; it is reported here, not hidden.
+   */
+  private function rollBackBinding(Transaction $transaction, int $submissionId): string {
+    try {
+      $transaction->rollBack();
+    }
+    catch (\Throwable $exception) {
+      $this->logger->error('A dispatch checkout binding rollback for submission @sid threw (@type); cleanup FAILED and the outcome is uncertain. No receipt was published and no row was deleted or recreated.', [
+        '@sid' => $submissionId,
+        '@type' => get_class($exception),
+      ]);
+      return self::ROLLBACK_FAILED;
+    }
+
+    // Normal return is not proof. Confirm via the client-level transaction state: a closed client
+    // transaction means the uncommitted writes are not durable (rolled back or voided); a still-open
+    // or unreadable client is UNKNOWN cleanup, not a confirmed rollback.
+    $clientInTx = $this->clientInTransaction();
+    if ($clientInTx === FALSE) {
+      return self::ROLLBACK_DISPOSED;
+    }
+    $this->logger->error('A dispatch checkout binding rollback for submission @sid returned but did not confirm disposal (client_in_tx=@c); cleanup UNKNOWN. No receipt was published and no row was deleted or recreated.', [
+      '@sid' => $submissionId,
+      '@c' => var_export($clientInTx, TRUE),
+    ]);
+    return self::ROLLBACK_UNKNOWN;
+  }
+
+  /**
+   * Reports whether the client-level (e.g. PDO) connection is in a transaction, or NULL if unknown.
+   *
+   * The supported evidence the decision record relies on (Connection::getClientConnection() is
+   * public). Used only as corroborating evidence — combined with the post-transaction callback and
+   * the Drupal-level inTransaction(), never on its own as an acknowledgement of a successful commit.
+   * NULL means the client state could not be read, which callers treat as "not established":
+   * fail-closed for the commit gate (requires TRUE before / not-TRUE after) and UNKNOWN for rollback
+   * disposal (requires an explicit FALSE).
+   */
+  private function clientInTransaction(): ?bool {
+    try {
+      $client = $this->database->getClientConnection();
+      if (is_object($client) && method_exists($client, 'inTransaction')) {
+        return (bool) $client->inTransaction();
+      }
+    }
+    catch (\Throwable) {
+    }
+    return NULL;
+  }
+
+  /**
+   * Resets the entity caches for a draft order a rollback has already removed.
+   *
+   * A rolled-back order leaves the in-memory object carrying its assigned id and
+   * fields, so a later load keyed by that id could be served a phantom from the static
+   * or persistent entity cache even though no row remains. The order and its items are
+   * therefore evicted here. This is cache hygiene, not deletion: the rows are already
+   * gone with the transaction, so discard() is deliberately NOT called — it would try to
+   * delete rows the rollback removed. Best-effort and swallowed: a cache that cannot be
+   * reset must not mask the rollback it follows.
+   */
+  private function discardOrderCaches(OrderInterface $order): void {
+    try {
+      $orderId = (int) $order->id();
+      $itemIds = [];
+      foreach ($order->getItems() as $item) {
+        $itemId = (int) $item->id();
+        if ($itemId > 0) {
+          $itemIds[] = $itemId;
+        }
+      }
+      if ($orderId > 0) {
+        $this->entityTypeManager->getStorage('commerce_order')->resetCache([$orderId]);
+      }
+      if ($itemIds !== []) {
+        $this->entityTypeManager->getStorage('commerce_order_item')->resetCache($itemIds);
+      }
+    }
+    catch (\Throwable $exception) {
+      $this->logger->warning('The entity caches for a rolled-back dispatch order could not be reset: @type.', [
+        '@type' => get_class($exception),
+      ]);
+    }
   }
 
   /**
@@ -334,7 +693,7 @@ final class DispatchCheckoutManager implements DispatchCheckoutManagerInterface 
    * itself once the store returns a Reservation, and a second forget would be this
    * class taking over ownership of a decision the planner already makes.
    */
-  private function confirmHeld(int $orderId, Slot $slot, WebformSubmissionInterface $submission): CheckoutOutcome {
+  private function confirmHeld(int $orderId, Slot $slot, WebformSubmissionInterface $submission, QuoteSnapshot $accepted): CheckoutOutcome {
     $hold = $this->owner->heldSlot($slot);
     if ($hold === NULL) {
       // Authorized, but this session holds no receipt for the Slot — a new session,
@@ -359,7 +718,66 @@ final class DispatchCheckoutManager implements DispatchCheckoutManagerInterface 
       return CheckoutOutcome::refused(DispatchReason::HoldNotFound);
     }
 
-    $result = $this->planner->confirmCheckoutReservation($hold, $submission);
+    // The money about to be captured must still be the money the customer agreed
+    // to (Task 24B / E08). The snapshot's figure was written onto the order item as
+    // an overridden unit price, which OrderRefresh leaves alone — but an order
+    // processor, a promotion, a tax, or an added item could still move the payable
+    // total between opening the order and confirming it, and the total is what the
+    // capture will take. So the order's own computed getTotalPrice(), the number
+    // Commerce would actually charge, is compared with the accepted amount and
+    // currency here. This is cross-system I/O and read-only, so it runs pre-lock:
+    // loading a Commerce order inside the Resource Calendar Guard's transaction
+    // would be exactly the external work the locked path forbids. A mismatch takes
+    // the same undo as any refusal below — Hold back, attempt failed, authorization
+    // voided — so no capacity is booked and no money is taken.
+    if (!$this->orderPayableMatches($orderId, $accepted)) {
+      $this->releaseHold($hold);
+
+      if (!$this->settleUnpaid($orderId, CheckoutState::Failed)) {
+        // A concurrent confirmation for this order won the race. If it left a
+        // Reservation that booking is the customer's; answer with the truth and do
+        // not void the authorization it captured.
+        $current = $this->attempts->loadByOrder($orderId);
+        if ($current !== NULL && $current->state->hasReservation()) {
+          return CheckoutOutcome::confirmed();
+        }
+        return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+      }
+
+      $this->voidAuthorization($orderId);
+      $this->logger->warning('Order @order was authorized but its payable total no longer matches the accepted quote, so the authorization was voided and no Reservation was made.', [
+        '@order' => $orderId,
+      ]);
+      return CheckoutOutcome::refused(DispatchReason::InvalidRequest);
+    }
+
+    // The accepted job must still be the job now on the submission (Task 24B /
+    // E09). The planner re-proves the Slot timing under its own locks, but timing
+    // is all it re-proves: an edited address, service, package, or access fact that
+    // did not change the reserved duration would otherwise confirm under the price
+    // the customer accepted for the old job. Both accepted-job axes are carried into
+    // the confirmation seam so the comparisons happen inside the guard transaction,
+    // against the authoritative stored plan, rather than in an unlocked check here
+    // that a second caller could bypass:
+    //   - the job-facts digest, which the planner recomputes from the saved
+    //     submission INSIDE the locked callback (reading inputs, never re-pricing)
+    //     and refuses on mismatch;
+    //   - the snapshot binding identity — QuoteSnapshot::bindingIdentity(), NOT the
+    //     bare snapshot id — which the planner binds under the lock to the
+    //     reservation's own persisted price_snapshot_id, so the accepted quote being
+    //     settled is provably the one this reservation was held for.
+    // $accepted is the immutable attempt row's snapshot, hydrated through fromStored()
+    // and sealed by its payload digest, so both values are the ones the customer
+    // accepted, not anything recomputed against today's mutable config. The binding is
+    // VERSION-AWARE: a current-format snapshot's binding identity carries a version
+    // prefix, and the seam REFUSES it against a NULL/empty/mismatched stored id —
+    // missing data is not proof of legacy status. Only a genuine legacy attempt, whose
+    // snapshot carries no versioned identity, is skipped rather than false-refused. A
+    // mismatch on either axis refuses with InvalidRequest, which the failure path below
+    // voids and reports exactly as any other planner refusal. This narrows the
+    // confirm-window race but does not fully close it; the planner documents the
+    // residual and why full closure is migration-gated.
+    $result = $this->planner->confirmCheckoutReservation($hold, $submission, $accepted->jobFactsDigest, $accepted->bindingIdentity());
     if (!$result->isConfirmed() || $result->reservationId === NULL) {
       // Give the Hold back first: whatever becomes of the money, the capacity this
       // request took returns to the calendar. release() is ownership-checked and
@@ -595,6 +1013,76 @@ final class DispatchCheckoutManager implements DispatchCheckoutManagerInterface 
         '@message' => $e->getMessage(),
       ]);
     }
+  }
+
+  /**
+   * Whether the order's payable total is still the accepted amount and currency.
+   *
+   * Verifies what will actually be charged, not what was written. The snapshot's
+   * figure is set as the order item's overridden unit price, so OrderRefresh does
+   * not recalculate it from a purchased entity — a dispatch item has none. But the
+   * amount a capture takes is the order's getTotalPrice(), which is the sum over
+   * items of quantity times unit price plus every adjustment, and an adjustment a
+   * processor, a promotion, or a tax added after the order was opened is not
+   * visible on the unit price at all. So the order is loaded and three things are
+   * checked against the accepted snapshot: that it still carries exactly the one
+   * priced item the quote was for, that the item's quantity is still one, and that
+   * the computed total equals the accepted amount in the accepted currency.
+   * Price::equals() compares the number and the currency together and never throws
+   * on a currency it does not share, so a total drifted in either dimension is a
+   * mismatch rather than an exception.
+   *
+   * FALSE on anything unreadable or unequal: a missing order, a storage fault, a
+   * NULL total, an item count or quantity that is not one, or a total that is not
+   * the accepted figure. The caller treats FALSE as a refusal that voids the
+   * authorization and books nothing, which is the safe direction — a booking is
+   * declined, never confirmed against a total the customer did not accept.
+   */
+  private function orderPayableMatches(int $orderId, QuoteSnapshot $accepted): bool {
+    if ($orderId < 1) {
+      return FALSE;
+    }
+
+    try {
+      $order = $this->entityTypeManager->getStorage('commerce_order')->load($orderId);
+    }
+    catch (\Exception $e) {
+      $this->logger->error('Commerce order storage was unavailable while verifying the payable total for order @order: @message', [
+        '@order' => $orderId,
+        '@message' => $e->getMessage(),
+      ]);
+      return FALSE;
+    }
+
+    if (!$order instanceof OrderInterface) {
+      return FALSE;
+    }
+
+    // Exactly the one priced item the quote was for. A second item — added by a
+    // later processor or a tampered order — would be charged for on the same
+    // capture, so its presence alone means the payable job is not the quoted one.
+    $items = $order->getItems();
+    if (count($items) !== 1) {
+      return FALSE;
+    }
+
+    // Quantity is a decimal string, compared as one so "1", "1.0", and "1.00" read
+    // alike and only a genuine change of count fails. A quantity other than one
+    // multiplies the accepted unit price into a total the customer never accepted.
+    $item = reset($items);
+    if (Calculator::compare((string) $item->getQuantity(), '1') !== 0) {
+      return FALSE;
+    }
+
+    // The number a capture will actually take — quantity times unit price plus
+    // every adjustment. Compared whole, in both amount and currency, with the
+    // figure the customer accepted.
+    $total = $order->getTotalPrice();
+    if ($total === NULL) {
+      return FALSE;
+    }
+
+    return $total->equals(new Price($accepted->amountDecimal(), $accepted->currency));
   }
 
   /**

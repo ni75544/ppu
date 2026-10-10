@@ -1,0 +1,4 @@
+OK   config/schema/custom_webform_handlers.schema.yml
+OK   config/install/custom_webform_handlers.settings.yml
+OK   custom_webform_handlers.services.yml
+YAML_STATUS=0

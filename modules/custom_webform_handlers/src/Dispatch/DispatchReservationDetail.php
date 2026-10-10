@@ -61,6 +61,8 @@ final class DispatchReservationDetail {
    *   Quoted amount in minor units, as quoted.
    * @param string|null $priceSnapshotCurrency
    *   Currency of the quoted amount.
+   * @param string|null $priceSnapshotVersion
+   *   Pricing-policy version the quote was computed under, kept verbatim.
    * @param int $created
    *   When the row was first written, in UTC.
    * @param int $changed
@@ -85,6 +87,7 @@ final class DispatchReservationDetail {
     public readonly ?string $priceSnapshotId,
     public readonly ?int $priceSnapshotCents,
     public readonly ?string $priceSnapshotCurrency,
+    public readonly ?string $priceSnapshotVersion,
     public readonly int $created,
     public readonly int $changed,
   ) {

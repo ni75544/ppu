@@ -1,0 +1,28 @@
+=== Task 24H browser-acceptance FAILURE evidence — 20260919T144600Z ===
+--- QA counter value (before any cache rebuild) ---
+0
+--- QA effective routing mode ---
+development_fixed
+--- QA concrete distance provider class bound to the preview seam ---
+Drupal\custom_webform_handlers\Distance\RoutingModeEntryProvider
+--- QA default distance_provider alias target ---
+Drupal\custom_webform_handlers\Distance\ChainDistanceProvider
+
+=== POSITIVE CONTROL (offline, recorded separately from browser acceptance) ===
+direct FixedDevelopmentRouteProvider->calculate(): counter 0 -> 1 (delta=1)
+wired customer_route_entry_provider->calculate() (dev mode): counter 0 -> 1 (delta=1)
+real HTTP route_preview (web SAPI) fresh pair: counter 0 -> 1 (delta=1)
+=> instrumentation is ACTIVE on CLI and web SAPI; NOT inactive.
+
+=== ENVIRONMENT ===
+opcache.validate_timestamps=On, revalidate_freq=0 => no stale opcode possible
+php-fpm clear_env=no => web SAPI inherits IS_DDEV_PROJECT=true => web effectiveMode=development_fixed (same as CLI)
+
+=== USD 29.50 REPRODUCED (deterministic courier quote for 19312m fixed-dev distance) ===
+service_type=courier => total=29.50 cents=2950 rate_version=2026-08-production-v1
+acceptance-gate double-calc: cents 2950==2950, currency USD, rate_version stable => MATCH=YES (accepts on resubmit)
+each calc increments counter (2 calcs => counter 2). No server-side infinite loop; gate converges in one correction.
+gate keys (total_cents,currency,rate_version) exactly match QuoteResult::toArray() keys.
+
+=== JS ===
+distance_calculator.js fires a server route_preview on a COMMITTED pair; it keeps a client-side localStorage route ledger (readRouteLedger/writeRouteLedger) and reuses a per-pair operation_id, so a pair already in that browser's ledger can send quote_only/replay (counter 0, valid cache reuse) rather than a fresh route_preview.

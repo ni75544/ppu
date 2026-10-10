@@ -47,6 +47,10 @@ final class ChainDistanceProvider implements DistanceProviderInterface, Schedule
    *   The clock.
    * @param \Psr\Log\LoggerInterface $logger
    *   The module logger.
+   * @param \Drupal\custom_webform_handlers\Distance\RoutingModeResolver|null $routingModeResolver
+   *   The routing-mode resolver. When it reports development_fixed, the chain
+   *   refuses before iterating any adapter, so no scheduling or ordinary path
+   *   dials out locally. NULL only for legacy construction without the guard.
    */
   public function __construct(
     private readonly string $purpose,
@@ -60,6 +64,7 @@ final class ChainDistanceProvider implements DistanceProviderInterface, Schedule
     private readonly RequestStack $requestStack,
     private readonly TimeInterface $time,
     private readonly LoggerInterface $logger,
+    private readonly ?RoutingModeResolver $routingModeResolver = NULL,
   ) {}
 
   /**
@@ -95,6 +100,16 @@ final class ChainDistanceProvider implements DistanceProviderInterface, Schedule
     ?int $departureAt,
     RoutingPolicy $policy,
   ): DistanceResult {
+    // Fail closed in development_fixed mode before any adapter, coordinate
+    // resolution or budget reservation. Belt-and-braces with the per-adapter
+    // socket guard in CoordinateRouteProviderBase: this refuses the whole chain
+    // in one place, so development never spends budget or geocodes on a route it
+    // is not allowed to fetch. The dispatch estimator serves fixtures directly
+    // in this mode and does not reach the chain; this guards a direct caller.
+    if ($this->routingModeResolver?->isDevelopmentFixed()) {
+      throw DistanceProviderException::classified(DistanceProviderException::NOT_CONFIGURED);
+    }
+
     $started = microtime(TRUE);
     $effectiveDeparture = $departureAt === NULL ? NULL : RoutingPolicy::effectiveDeparture(
       $this->configFactory->get('custom_webform_handlers.settings'),
